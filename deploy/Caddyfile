@@ -1,0 +1,89 @@
+{
+	admin off
+	persist_config off
+	default_sni {$TEAM_S3_HOST:s3.example.org}
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>headers delete
+			}
+		}
+	}
+	servers {
+		max_header_size 32KB
+		timeouts {
+			read_header 10s
+			read_body 15m
+			read_body_idle 60s
+			write_idle 60s
+			idle 2m
+		}
+	}
+}
+
+{$TEAM_MCP_HOST:mcp.example.org} {
+	{$TEAM_TLS_DIRECTIVE}
+	@mcp path /mcp
+	handle @mcp {
+		request_body {
+			max_size 131072
+		}
+		reverse_proxy team-mcp:8000 {
+			flush_interval -1
+		}
+	}
+	respond 404
+}
+
+{$TEAM_S3_HOST:s3.example.org} {
+	{$TEAM_TLS_DIRECTIVE}
+	@copy header x-amz-copy-source *
+	@write {
+		method PUT
+		path_regexp stage ^/team-staging/staging/[a-f0-9]{32}$
+	}
+	@read {
+		method GET
+		path_regexp final ^/team-final/artifacts/[a-f0-9]{32}/[a-f0-9]{32}$
+	}
+	route {
+		respond @copy 403
+		handle @write {
+			request_body {
+				max_size 67108864
+			}
+			forward_auth team-mcp:8000 {
+				uri /authorize-put
+				header_up X-Team-Original-Length {http.request.header.Content-Length}
+				header_up X-Team-Forward-Secret {$TEAM_GATEWAY_SECRET}
+			}
+			reverse_proxy garage:3900 {
+				header_up Host {http.request.hostport}
+				transport http {
+					max_conns_per_host 32
+					response_header_timeout 15m
+					versions 1.1
+				}
+			}
+		}
+		handle @read {
+			header {
+				>Content-Type application/octet-stream
+				>Content-Disposition attachment
+				>X-Content-Type-Options nosniff
+				>Cache-Control "private, no-store"
+			}
+			reverse_proxy garage:3900 {
+				header_up Host {http.request.hostport}
+				transport http {
+					max_conns_per_host 32
+					response_header_timeout 30s
+					versions 1.1
+				}
+			}
+		}
+		respond 404
+	}
+}

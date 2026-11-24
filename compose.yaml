@@ -1,0 +1,107 @@
+services:
+  garage:
+    image: dxflrs/garage:v2.6.0@sha256:4b5a318fc9fe2fbec5d3af590eeafe05d83492e6411266fa0b9e215c20264013
+    command: [/garage, server]
+    restart: unless-stopped
+    volumes:
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+      - type: bind
+        source: ${TEAM_SECRETS_DIR:-./secrets}
+        target: /run/team-secrets
+        read_only: true
+    healthcheck:
+      test: [CMD, /garage, node, id]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [storage]
+
+  garage-init:
+    build:
+      context: .
+      dockerfile: deploy/garage-init.Dockerfile
+    entrypoint: [/bin/sh, /init-garage.sh]
+    environment:
+      GARAGE_CAPACITY: ${GARAGE_CAPACITY:-300GB}
+    volumes:
+      - ./deploy/init-garage.sh:/init-garage.sh:ro
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta:ro
+      - ${TEAM_SECRETS_DIR:-./secrets}:/run/team-secrets:ro
+    depends_on:
+      garage:
+        condition: service_healthy
+    network_mode: service:garage
+
+  team-mcp:
+    build:
+      context: .
+      args:
+        UV_FLAGS: ${TEAM_UV_FLAGS:---no-dev}
+    restart: unless-stopped
+    environment:
+      TEAM_MCP_URL: https://${TEAM_MCP_HOST:-mcp.example.org}/mcp
+      TEAM_S3_PUBLIC_URL: https://${TEAM_S3_HOST:-s3.example.org}
+      TEAM_FILE_LIMIT: ${TEAM_FILE_LIMIT:-53687091200}
+      TEAM_STORAGE_LIMIT: ${TEAM_STORAGE_LIMIT:-214748364800}
+      TEAM_DISK_FLOOR: ${TEAM_DISK_FLOOR:-10737418240}
+      TEAM_PART_SIZE: ${TEAM_PART_SIZE:-67108864}
+      TEAM_UPLOAD_TTL: ${TEAM_UPLOAD_TTL:-86400}
+      TEAM_PUT_TTL: ${TEAM_PUT_TTL:-300}
+      TEAM_GET_TTL: ${TEAM_GET_TTL:-600}
+      TEAM_TRANSFER_GRACE: ${TEAM_TRANSFER_GRACE:-900}
+      TEAM_AGENT_UPLOADS: ${TEAM_AGENT_UPLOADS:-2}
+      TEAM_TOTAL_UPLOADS: ${TEAM_TOTAL_UPLOADS:-8}
+      TEAM_PUT_RATE: ${TEAM_PUT_RATE:-2}
+      TEAM_TOKEN_PEPPER_FILE: /run/team-secrets/token_pepper
+      TEAM_GATEWAY_SECRET_FILE: /run/team-secrets/gateway_secret
+    volumes:
+      - sqlite:/var/lib/team-mcp
+      - garage-data:/garage-data:ro
+      - ${TEAM_SECRETS_DIR:-./secrets}:/run/team-secrets:ro
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [storage, edge]
+
+  reverse-proxy:
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        export TEAM_GATEWAY_SECRET="$$(tr -d '\r\n' < /run/gateway_secret)"
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    restart: unless-stopped
+    ports:
+      - "${TEAM_HTTP_BIND:-80}:80"
+      - "${TEAM_HTTPS_BIND:-443}:443"
+    environment:
+      TEAM_MCP_HOST: ${TEAM_MCP_HOST:-mcp.example.org}
+      TEAM_S3_HOST: ${TEAM_S3_HOST:-s3.example.org}
+      TEAM_TLS_DIRECTIVE: ${TEAM_TLS_DIRECTIVE:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${TEAM_SECRETS_DIR:-./secrets}/gateway_secret:/run/gateway_secret:ro
+      - caddy-data:/data
+    depends_on:
+      team-mcp:
+        condition: service_healthy
+    networks: [edge, storage]
+
+networks:
+  storage:
+    internal: true
+  edge:
+volumes:
+  garage-meta:
+  garage-data:
+  sqlite:
+  caddy-data:

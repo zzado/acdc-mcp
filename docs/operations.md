@@ -1,0 +1,143 @@
+# 서버 운영 가이드
+
+[README의 초기 설치](../README.md#서버-설치)를 마친 Linux 서버에서 실행합니다. 명령은 저장소 루트를 기준으로 합니다. Docker 접근 권한이 있는 서버 운영자가 아래 관리 작업을 수행합니다.
+
+## 사설 HTTPS
+
+사설 DNS에서 MCP와 파일 전송 호스트 이름을 같은 서버로 연결합니다. `.env`에 두 이름을 각각 설정하고 `TEAM_TLS_DIRECTIVE="tls internal"`을 추가합니다.
+
+```bash
+docker compose up -d --wait reverse-proxy
+docker compose cp reverse-proxy:/data/caddy/pki/authorities/local/root.crt /tmp/acdc-mcp-root.crt
+```
+
+서버에서 내보낸 `root.crt`를 배포할 팀원이 신뢰하는 경로로 전달하고 각 Agent 호스트의 신뢰 저장소에 추가합니다. 클라이언트에 따라 별도의 CA 설정이 필요할 수 있습니다. curl 접속 확인에는 `--cacert /path/to/acdc-mcp-root.crt`를 사용합니다. Caddy 데이터 볼륨에는 CA의 개인키도 있으므로 배포 중 보관하고 백업을 암호화합니다.
+
+## 팀원·Agent와 토큰
+
+```bash
+docker compose exec -T team-mcp team-mcp user-add alice
+docker compose exec -T team-mcp team-mcp agent-add USER_ID --days 30
+docker compose exec -T team-mcp team-mcp token-issue AGENT_ID --days 30
+docker compose exec -T team-mcp team-mcp token-revoke OLD_CREDENTIAL_ID
+docker compose exec -T team-mcp team-mcp user-disable USER_ID
+```
+
+등록은 앞의 두 명령으로 완료합니다. 토큰을 교체할 때는 `token-issue`로 같은 Agent의 새 토큰을 발급하고, 팀원이 새 토큰으로 접속한 뒤 기존 `credential_id`를 폐기합니다. 팀원 계정을 비활성화하면 해당 팀원의 Agent 토큰도 더 이상 인증되지 않습니다. 폐기 전에 발급된 다운로드 URL은 정해진 시각까지 유효합니다.
+
+### 비공개 채널 권한
+
+```bash
+docker compose exec -T team-mcp team-mcp channel-grant CHANNEL_ID USER_ID
+docker compose exec -T team-mcp team-mcp channel-revoke CHANNEL_ID USER_ID
+```
+
+`USER_ID`는 `user-add`의 출력 또는 `list_agents` 항목의 `user_id`에서 확인합니다. 같은 팀원의 Agent들은 해당 비공개 채널에 부여된 사용자 권한을 공유합니다.
+
+## 설정, 점검 및 로그
+
+| 설정 | 기본값 | 적용 내용 |
+| --- | --- | --- |
+| `TEAM_MCP_HOST`, `TEAM_S3_HOST` | `mcp.example.org`, `s3.example.org` | 클라이언트 MCP 주소와 서명 URL의 호스트 이름 |
+| `TEAM_HTTP_BIND`, `TEAM_HTTPS_BIND` | 80, 443 | Caddy가 서버에 게시하는 포트 |
+| `TEAM_SECRETS_DIR` | `./secrets` | 서버 비밀 파일의 위치 |
+| `GARAGE_CAPACITY` | `300GB` | Garage 최초 레이아웃에 기록되는 노드의 선언 용량 |
+| `TEAM_UPLOAD_TTL` | 86,400초 | 업로드 세션 유효 기간 |
+| `TEAM_PUT_TTL`, `TEAM_GET_TTL` | 300초, 600초 | 업로드·다운로드 서명 URL의 기본 유효 기간 |
+| `TEAM_TRANSFER_GRACE` | 900초 | 승인된 전송이 남아 있을 수 있어 정리를 유예하는 시간 |
+| `TEAM_PUT_RATE` | 초당 2건 | Agent별 PUT 승인율 |
+
+파일과 저장 용량 제한은 [README의 용량 설정](../README.md#용량-설정)을 참고합니다. `TEAM_TRANSFER_GRACE`는 Caddy의 최대 업로드 15분 이상으로 설정합니다. 애플리케이션은 만료·취소 세션을 계속 정리하며, Garage 초기화 작업도 7일이 지난 미완료 Multipart를 정리합니다.
+
+```bash
+docker compose config --quiet
+docker compose ps -a
+docker compose exec -T team-mcp team-mcp status
+docker compose logs --tail 100 team-mcp garage garage-init reverse-proxy
+```
+
+`status`의 `disk_free`, `reserved_bytes`, `ready_bytes`, `oldest_cleanup_due`를 관찰합니다. Garage와 SQLite가 다른 파일시스템에 있으면 두 파일시스템의 여유 공간을 각각 확인합니다.
+
+| 증상 | 확인할 항목 |
+| --- | --- |
+| `garage-init` 실패 | Garage 상태와 초기화 로그, 비밀 파일 경로·권한을 확인합니다. 원인을 수정한 뒤 `docker compose run --rm garage-init`으로 재실행합니다. |
+| 공인 인증서 발급 실패 | MCP·파일 호스트 이름의 DNS, 두 포트와 Caddy 로그를 확인합니다. |
+| MCP `401` | Agent 토큰의 만료·폐기와 클라이언트 프로세스의 환경 변수를 확인합니다. |
+| PUT `400` | `Content-Length`가 반환된 크기와 일치하는지 확인합니다. |
+| 파일 전송 주소의 인증서·서명 오류 | Agent에서 파일 호스트의 DNS와 TLS를 확인합니다. 서명 URL의 호스트·경로·쿼리는 발급된 그대로 사용합니다. |
+| 파일이 목록에 없음 | 업로더가 `get_upload_status`에서 `ready`와 검증 해시를 확인했는지, 조회 Agent가 채널 권한을 받았는지 확인합니다. |
+
+설정을 변경한 뒤 `docker compose up -d --wait`로 적용합니다. 코드와 이미지를 업데이트할 때는 백업 후 배포할 커밋에서 `docker compose up -d --build --wait`를 실행합니다. 정상 중지는 `docker compose stop`을 사용합니다. `down -v`는 프로젝트의 데이터 볼륨을 삭제합니다.
+
+## 백업
+
+경기 외 시간에 새 작업을 중지하고 진행 중인 업로드와 검증이 끝나기를 기다립니다. 서비스 중지 상태에서 SQLite 백업과 Garage 데이터를 한 시점으로 묶습니다. 아래 예제는 `.env`에 `COMPOSE_PROJECT_NAME=acdc-mcp`를 설정한 배포를 기준으로 합니다. 다른 프로젝트 이름을 사용했다면 `project`에 해당 이름을 넣습니다.
+
+```bash
+set -e
+umask 077
+project=acdc-mcp
+backup_dir=$(mktemp -d "$HOME/acdc-mcp-backup.XXXXXX")
+backup_db="backup-$(date -u +%Y%m%dT%H%M%SZ).sqlite"
+helper_image='python:3.14.10-slim-trixie@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b'
+
+docker volume inspect "${project}_sqlite" "${project}_garage-meta" \
+  "${project}_garage-data" "${project}_caddy-data" >/dev/null
+git rev-parse HEAD > "$backup_dir/revision"
+docker compose -p "$project" images > "$backup_dir/images.txt"
+printf '%s\n' "$backup_db" > "$backup_dir/sqlite-filename"
+
+docker compose -p "$project" stop reverse-proxy team-mcp garage
+docker compose -p "$project" run --rm --no-deps team-mcp \
+  db-backup "/var/lib/team-mcp/$backup_db"
+
+docker run --rm \
+  --mount "type=volume,src=${project}_sqlite,dst=/snapshot/db,readonly" \
+  --mount "type=volume,src=${project}_garage-meta,dst=/snapshot/meta,readonly" \
+  --mount "type=volume,src=${project}_garage-data,dst=/snapshot/data,readonly" \
+  --mount "type=volume,src=${project}_caddy-data,dst=/snapshot/caddy,readonly" \
+  --mount "type=bind,src=$backup_dir,dst=/backup" \
+  "$helper_image" sh -ec 'tar -C /snapshot -czf /backup/volumes.tar.gz "db/$1" meta data caddy' sh "$backup_db"
+
+(cd "$backup_dir" && sha256sum volumes.tar.gz > volumes.sha256)
+docker compose -p "$project" up -d --wait
+printf 'Backup: %s\n' "$backup_dir"
+```
+
+`.env`, 변경한 Compose·Caddy·Garage 설정과 원래 `secrets/`도 같은 복구 시점에 맞춰 보관합니다. 아카이브에는 팀의 파일과 TLS 키가 들어 있습니다. 자료를 암호화해 다른 호스트에 보관합니다. 각 백업은 SQLite 볼륨에도 백업 DB 한 개를 남기므로 보존 정책에 따라 오래된 백업의 용량을 관리합니다.
+
+## 빈 볼륨에 복원
+
+원본과 동일한 코드 리비전과 구성으로 복구 환경을 준비합니다. 보관했던 비밀 파일과 권한을 복원하고, 원본과 다른 **새 Compose 프로젝트 이름**을 선택합니다. 아래 `backup_dir`에는 검증할 백업의 절대 경로를 넣습니다.
+
+```bash
+set -e
+recovery_project=acdc-mcp-restore
+backup_dir=/absolute/path/to/acdc-mcp-backup
+backup_db=$(cat "$backup_dir/sqlite-filename")
+helper_image='python:3.14.10-slim-trixie@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b'
+
+(cd "$backup_dir" && sha256sum --check volumes.sha256)
+docker compose -p "$recovery_project" build team-mcp garage-init
+docker compose -p "$recovery_project" create reverse-proxy
+
+docker run --rm \
+  --mount "type=volume,src=${recovery_project}_sqlite,dst=/snapshot/db" \
+  --mount "type=volume,src=${recovery_project}_garage-meta,dst=/snapshot/meta" \
+  --mount "type=volume,src=${recovery_project}_garage-data,dst=/snapshot/data" \
+  --mount "type=volume,src=${recovery_project}_caddy-data,dst=/snapshot/caddy" \
+  --mount "type=bind,src=$backup_dir,dst=/backup,readonly" \
+  "$helper_image" sh -ec '
+    tar -C /snapshot -xzf /backup/volumes.tar.gz
+    mv -- "/snapshot/db/$1" /snapshot/db/team.sqlite
+    chown 10001:10001 /snapshot/db /snapshot/db/team.sqlite
+  ' sh "$backup_db"
+
+docker compose -p "$recovery_project" run --rm --no-deps team-mcp reset-event-epoch
+docker compose -p "$recovery_project" up -d --wait team-mcp
+docker compose -p "$recovery_project" exec -T team-mcp team-mcp status
+```
+
+이 단계까지는 복구 프로젝트의 Caddy가 시작되지 않습니다. 준비 상태를 확인한 뒤 기존 서비스와 포트 충돌이 없는 시점에 `docker compose -p "$recovery_project" up -d --wait reverse-proxy`를 실행합니다. 외부 접속을 열기 전에 테스트 계정으로 메시지, 채널 권한, Artifact 다운로드와 SHA-256을 점검합니다. 백업 시점 이후에 폐기했던 토큰과 비활성화한 계정은 다시 반영합니다. 이벤트 커서에 `CURSOR_RESET`이 반환되면 0부터 동기화를 다시 시작합니다.
+
+단일 Garage 노드에서는 디스크나 서버 장애 시 복구에 걸리는 시간만큼 서비스가 중지되고, 마지막 정상 백업 이후의 변경분을 잃을 수 있습니다.

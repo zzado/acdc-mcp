@@ -1,0 +1,10 @@
+services:
+  garage:
+    environment:
+      GARAGE_ALLOW_WORLD_READABLE_SECRETS: "true"
+  garage-init:
+    environment:
+      GARAGE_ALLOW_WORLD_READABLE_SECRETS: "true"
+  reverse-proxy:
+    ports: !override
+      - "127.0.0.1:443:443"

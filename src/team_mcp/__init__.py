@@ -1,0 +1,1 @@
+"""Team MCP collaboration server."""
