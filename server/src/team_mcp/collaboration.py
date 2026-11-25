@@ -15,10 +15,6 @@ def view(row):
     return result
 
 
-def contains(query):
-    return "%" + query.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
-
-
 class Collaboration:
     def __init__(self, db, security):
         self.db = db
@@ -141,10 +137,10 @@ class Collaboration:
             def read(before, count):
                 return cx.execute("""
                    SELECT * FROM messages WHERE channel_id=? AND id<? AND (? IS NULL OR id=? OR thread_root_id=?)
-                     AND (? IS NULL OR content LIKE ? ESCAPE '!')
+                     AND (? IS NULL OR instr(casefold(content), ?) > 0)
                    ORDER BY id DESC LIMIT ?
                    """, (channel, before if before is not None else 2**63 - 1, thread, thread, thread,
-                         query, contains(query or ""), count)).fetchall()
+                         query, (query or "").casefold(), count)).fetchall()
 
             return self.page(who, "messages", [channel, query, thread], cursor, limit, lambda row: row["id"],
                              read, lambda row: self.message(cx, row))

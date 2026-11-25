@@ -51,6 +51,18 @@ def test_messages_concurrency_and_idempotency(team):
         collab.read_messages(second, channel, "발견_%", None, page["next_cursor"], 50)
 
 
+def test_message_search_unicode_and_literal_characters(team):
+    collab, _, (writer, reader, _), _ = team
+    channel = collab.create_channel(writer, "Search", "search")["id"]
+    for key, content in enumerate(("Ünïcödé: Straße_%!", "strasseABC!", "other")):
+        collab.send_message(writer, content, str(key), channel, None, None, "chat", [])
+
+    for query in ("ünïcödé", "STRASSE_%!", "_%!"):
+        rows = collab.read_messages(reader, channel, query, None, None, 20)["items"]
+        assert [row["content"] for row in rows] == ["Ünïcödé: Straße_%!"]
+    assert collab.read_messages(reader, channel, "unicode", None, None, 20)["items"] == []
+
+
 def test_team_channels_dm_and_incremental_events(team):
     collab, sec, (first, second, third), tokens = team
     first_channel = collab.create_channel(first, "Problem A", "problem-a")["id"]

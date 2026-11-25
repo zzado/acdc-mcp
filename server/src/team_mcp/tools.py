@@ -6,8 +6,9 @@ from functools import wraps
 from typing import Annotated, Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
+from fastmcp.exceptions import ValidationError
 from fastmcp.server.dependencies import get_access_token
-from fastmcp.tools import ToolResult
+from fastmcp.tools import FunctionTool, ToolResult
 from pydantic import Field, JsonValue, StringConstraints
 
 from .db import DomainError
@@ -73,6 +74,16 @@ def output_schema(properties):
     return {"type": "object", "oneOf": [success, failure]}
 
 
+class TeamTool(FunctionTool):
+    async def run(self, arguments):
+        try:
+            return await super().run(arguments)
+        except ValidationError:
+            # FastMCP validates arguments before entering the tool function.
+            error = DomainError("VALIDATION", f"Arguments do not match the input schema for {self.name}")
+            return ToolResult(structured_content={"error": error.body}, is_error=True)
+
+
 def install_tools(mcp, collaboration, storage, security, rate):
     def tool(*fields, **extra_properties):
         def decorate(function):
@@ -115,7 +126,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
             call.__signature__ = signature.replace(parameters=list(signature.parameters.values())[1:],
                                                    return_annotation=ToolResult)
             properties = {name: FIELDS[name] for name in fields} | extra_properties
-            return mcp.tool(call, output_schema=output_schema(properties))
+            return mcp.add_tool(TeamTool.from_function(call, output_schema=output_schema(properties)))
         return decorate
 
     @tool("id", "name")

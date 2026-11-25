@@ -10,7 +10,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .collaboration import contains, view
+from .collaboration import view
 from .db import DomainError, audit, canonical, event, idempotent, iso, now
 from .security import accessible_channel
 from .settings import MIB
@@ -234,6 +234,7 @@ class Storage:
             return self.artifact(self.get_ready(cx, who, artifact_id))
 
     def list_artifacts(self, who, channel, query, tag, cursor, limit):
+        needle = (query or "").casefold()
         with self.db.transaction() as cx:
             accessible_channel(cx, who.agent_id, channel)
 
@@ -241,10 +242,10 @@ class Storage:
                 timestamp, artifact_id = after or [0, ""]
                 return cx.execute("""
                     SELECT * FROM artifacts WHERE channel_id=? AND status='ready' AND (created_at,id)>(?,?)
-                      AND (? IS NULL OR filename LIKE ? ESCAPE '!' OR description LIKE ? ESCAPE '!')
+                      AND (? IS NULL OR instr(casefold(filename), ?) > 0 OR instr(casefold(description), ?) > 0)
                       AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(tags) WHERE value=?))
                     ORDER BY created_at,id LIMIT ?
-                    """, (channel, timestamp, artifact_id, query, contains(query or ""), contains(query or ""),
+                    """, (channel, timestamp, artifact_id, query, needle, needle,
                           tag, tag, count)).fetchall()
 
             return self.collaboration.page(who, "artifacts", [channel, query, tag], cursor, limit,

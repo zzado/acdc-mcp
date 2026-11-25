@@ -173,11 +173,27 @@ def test_messages_auth_and_events(team):
     assert {int(e["entity_id"]) for e in new["events"] if e["channel_id"] == shared} == {m["id"] for m in messages}
 
 
+@pytest.mark.parametrize("modern", [False, True])
+def test_tool_input_validation(team, modern):
+    writer, _, _, credentials, tls = team
+    client = Client(credentials[0]["token"], tls, modern=True) if modern else writer
+    shared = channel(writer)
+    message = {"channel_id": shared, "content": "hello", "idempotency_key": uuid4().hex}
+    for invalid in ({"content": ""}, {"type": "unknown"}, {"content": "a" * 8193}, {"content": "한" * 2731}):
+        error = client.tool("send_message", error="VALIDATION", **(message | invalid))["error"]
+        assert error["retryable"] is False and error["message"]
+    client.tool("list_channels", limit=0, error="VALIDATION")
+    client.tool("request_upload", error="VALIDATION")
+    assert client.tool("read_messages", channel_id=shared)["items"] == []
+    assert client.tool("send_message", **message)["content"] == "hello"
+
+
 def test_upload_download_and_immutability(team):
     writer, reader, teammate, _, tls = team
     shared = channel(writer)
     payload = b"team verification\n" * 1024
-    reservation = {"channel_id": shared, "filename": "candidate.bin", "size": len(payload),
+    reservation = {"channel_id": shared, "filename": "Ünïcödé.bin", "description": "Straße_%!",
+                   "size": len(payload),
                    "sha256": hashlib.sha256(payload).hexdigest(), "idempotency_key": uuid4().hex}
     pending = writer.tool("request_upload", **reservation)
     artifact, upload = pending["artifact_id"], pending["upload_id"]
@@ -201,6 +217,10 @@ def test_upload_download_and_immutability(team):
     assert put(tls, grant, b"\x00" * len(payload)) == 403
     assert teammate.tool("get_artifact", artifact_id=artifact)["verified_sha256"] == ready["verified_sha256"]
     assert [item["id"] for item in teammate.tool("list_artifacts", channel_id=shared)["items"]] == [artifact]
+    for query in ("ünïcödé", "STRASSE_%!"):
+        matches = teammate.tool("list_artifacts", channel_id=shared, query=query)["items"]
+        assert [item["id"] for item in matches] == [artifact]
+    assert teammate.tool("list_artifacts", channel_id=shared, query="%bin")["items"] == []
     unrelated = channel(teammate)
     assert teammate.tool("list_artifacts", channel_id=unrelated)["items"] == []
     teammate.tool("send_message", channel_id=unrelated, content="Wrong channel", artifact_ids=[artifact],

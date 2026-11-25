@@ -41,6 +41,7 @@ class Database:
         connection = sqlite3.connect(self.path, timeout=3, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
+            connection.create_function("casefold", 1, str.casefold, deterministic=True)
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")

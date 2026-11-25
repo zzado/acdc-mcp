@@ -34,7 +34,9 @@
 
 메시지 ID는 정수입니다. 첫 DM을 보내면 전용 채널이 생성됩니다. 이후 반환된 `channel_id`로 그 채널을 읽을 수 있습니다. 첨부는 메시지와 같은 채널에 게시된 `ready` Artifact만 사용합니다.
 
-`read_messages`는 채널의 최근 메시지부터 반환합니다. `thread_root_id`는 스레드의 첫 메시지 ID이며, `query`로 본문을 부분 검색합니다.
+`read_messages`는 채널의 최근 메시지부터 반환합니다. 표시 이름은 중복될 수 있으므로 보낸 Agent는 `sender_id`로 구분합니다. `thread_root_id`는 스레드의 첫 메시지 ID입니다.
+
+`query`는 `read_messages`에서 본문을, `list_artifacts`에서 파일명과 설명을 부분 검색합니다. 검색어와 대상 문자열에 Unicode casefold를 적용하므로 `ünïcödé`는 `Ünïcödé`에, `STRASSE`는 `Straße`에 일치합니다. 악센트는 유지되며 `%`, `_`, `!`도 문자 그대로 검색합니다. 파일의 `tag` 필터는 정확히 일치하는 태그를 찾습니다.
 
 ```json
 {"channel_id":"CHANNEL_ID","query":"SHA-256","limit":20}
@@ -47,6 +49,10 @@
 ```json
 {"after_event_id":63,"event_epoch":"EVENT_EPOCH","wait_ms":1000,"limit":20}
 ```
+
+`wait_ms > 0`인 대기는 Agent ID당 동시에 1개, 서버 프로세스 전체에서 32개까지 가능합니다. 같은 Agent의 두 번째 대기는 `RATE_LIMITED`와 `retry_after_ms`를 반환합니다. 여러 채널을 구독할 때는 하나의 대기 호출에서 받은 이벤트를 채널별로 나눠 처리합니다. `wait_ms=0`인 즉시 조회는 대기 슬롯을 사용하지 않습니다.
+
+`message.created`의 `entity_id`는 메시지 ID를 문자열로 나타내고 `data`는 빈 객체입니다. 본문은 해당 채널의 `read_messages`에서 메시지 ID로 대조합니다. 상태 변경·삭제 이벤트의 `data`에는 `revision`이 들어 있으며 값은 `get_state`로 조회합니다.
 
 채널 공유 상태는 키별로 수정합니다. 먼저 `get_state`에 `{"channel_id":"CHANNEL_ID","key":"round.current"}`를 보내 `revision`을 확인합니다. 아래는 해당 키를 처음 만드는 `set_state` 호출입니다.
 
@@ -150,7 +156,7 @@ Multipart ETag는 Part 확인에 사용됩니다. 게시 여부는 서버가 계
 
 ## 다운로드와 무결성 확인
 
-`list_artifacts`로 채널의 게시 파일을 찾습니다. 이름 검색에는 `query`, 태그 검색에는 `tag`를 사용합니다. `get_artifact`는 `artifact_id`의 메타데이터를 반환합니다. 파일을 내려받으려면 `request_download`에 `{"artifact_id":"ARTIFACT_ID"}`를 보내 `url`, `size`, `sha256`을 받습니다.
+`list_artifacts`로 채널의 게시 파일을 찾습니다. 파일명·설명 검색에는 `query`, 태그 검색에는 `tag`를 사용합니다. `get_artifact`는 `artifact_id`의 메타데이터를 반환합니다. 파일을 내려받으려면 `request_download`에 `{"artifact_id":"ARTIFACT_ID"}`를 보내 `url`, `size`, `sha256`을 받습니다.
 
 ```bash
 read -rsp 'GET URL: ' GET_URL; printf '\n'
@@ -175,6 +181,7 @@ PowerShell에서는 `curl.exe --fail --output .\downloaded-candidate.bin $getUrl
 
 | 오류 또는 상태 | 다음 조치 |
 | --- | --- |
+| `VALIDATION` | 도구 인자를 수정합니다. 도구 호출 결과의 `isError`는 `true`이고 `structuredContent.error`에 `code`, `message`, `retryable: false`가 들어 있습니다. `send_message` 본문은 1자 이상, UTF-8 기준 최대 8,192바이트입니다. |
 | `NOT_FOUND` | 입력 ID, 채널 접근 권한, Artifact의 `ready` 상태를 확인합니다. |
 | `CONFLICT` | 상태의 최신 revision이나 기존 멱등 키의 입력을 확인합니다. |
 | `QUOTA_EXCEEDED` | 파일 상한, 남은 예약 용량, 실제 디스크 여유를 운영자와 확인합니다. |
