@@ -7,6 +7,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -15,11 +16,13 @@ import pytest
 
 pytestmark = pytest.mark.integration
 MIB = 1024**2
-BASE = ["docker", "compose", "-p", "team-mcp-test", "-f", "compose.yaml", "-f", "tests/compose.test.yaml"]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BASE = ["docker", "compose", "-p", "team-mcp-test", "-f", str(REPO_ROOT / "compose.yaml"),
+        "-f", str(REPO_ROOT / "server/tests/compose.test.yaml")]
 
 
 def compose(*arguments):
-    return subprocess.run([*BASE, *arguments], text=True, capture_output=True, check=True).stdout
+    return subprocess.run([*BASE, *arguments], cwd=REPO_ROOT, text=True, capture_output=True, check=True).stdout
 
 
 class Client:
@@ -77,7 +80,7 @@ class Client:
 def team():
     if os.getenv("TEAM_TEST_COMPOSE") != "1":
         pytest.skip("Set TEAM_TEST_COMPOSE=1 after starting the test stack")
-    tls = ssl.create_default_context(cafile="test-data/root.crt")
+    tls = ssl.create_default_context(cafile=REPO_ROOT / "test-data/root.crt")
     clients = []
     credentials = []
     for name in ("writer", "reader", "outsider"):

@@ -4,7 +4,7 @@ services:
     command: [/garage, server]
     restart: unless-stopped
     volumes:
-      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - ./server/deploy/garage.toml:/etc/garage.toml:ro
       - garage-meta:/var/lib/garage/meta
       - garage-data:/var/lib/garage/data
       - type: bind
@@ -20,14 +20,14 @@ services:
 
   garage-init:
     build:
-      context: .
+      context: ./server
       dockerfile: deploy/garage-init.Dockerfile
     entrypoint: [/bin/sh, /init-garage.sh]
     environment:
       GARAGE_CAPACITY: ${GARAGE_CAPACITY:-300GB}
     volumes:
-      - ./deploy/init-garage.sh:/init-garage.sh:ro
-      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - ./server/deploy/init-garage.sh:/init-garage.sh:ro
+      - ./server/deploy/garage.toml:/etc/garage.toml:ro
       - garage-meta:/var/lib/garage/meta:ro
       - ${TEAM_SECRETS_DIR:-./secrets}:/run/team-secrets:ro
     depends_on:
@@ -37,7 +37,7 @@ services:
 
   team-mcp:
     build:
-      context: .
+      context: ./server
       args:
         UV_FLAGS: ${TEAM_UV_FLAGS:---no-dev}
     restart: unless-stopped
@@ -88,7 +88,7 @@ services:
       TEAM_S3_HOST: ${TEAM_S3_HOST:-s3.example.org}
       TEAM_TLS_DIRECTIVE: ${TEAM_TLS_DIRECTIVE:-}
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./server/deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${TEAM_SECRETS_DIR:-./secrets}/gateway_secret:/run/gateway_secret:ro
       - caddy-data:/data
     depends_on:

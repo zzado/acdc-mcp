@@ -1,6 +1,6 @@
 # 서버 운영 가이드
 
-[README의 초기 설치](../README.md#서버-설치)를 마친 Linux 서버에서 실행합니다. 명령은 저장소 루트를 기준으로 합니다. Docker 접근 권한이 있는 서버 운영자가 아래 관리 작업을 수행합니다.
+[README의 초기 설치](README.md#서버-설치)를 마친 Linux 서버에서 실행합니다. 명령은 저장소 루트를 기준으로 합니다. Docker 접근 권한이 있는 서버 운영자가 아래 관리 작업을 수행합니다.
 
 ## 사설 HTTPS
 
@@ -47,7 +47,7 @@ docker compose exec -T team-mcp team-mcp channel-revoke CHANNEL_ID USER_ID
 | `TEAM_TRANSFER_GRACE` | 900초 | 승인된 전송이 남아 있을 수 있어 정리를 유예하는 시간 |
 | `TEAM_PUT_RATE` | 초당 2건 | Agent별 PUT 승인율 |
 
-파일과 저장 용량 제한은 [README의 용량 설정](../README.md#용량-설정)을 참고합니다. `TEAM_TRANSFER_GRACE`는 Caddy의 최대 업로드 15분 이상으로 설정합니다. 애플리케이션은 만료·취소 세션을 계속 정리하며, Garage 초기화 작업도 7일이 지난 미완료 Multipart를 정리합니다.
+파일과 저장 용량 제한은 [README의 용량 설정](README.md#용량-설정)을 참고합니다. `TEAM_TRANSFER_GRACE`는 Caddy의 최대 업로드 15분 이상으로 설정합니다. 애플리케이션은 만료·취소 세션을 계속 정리하며, Garage 초기화 작업도 7일이 지난 미완료 Multipart를 정리합니다.
 
 ```bash
 docker compose config --quiet

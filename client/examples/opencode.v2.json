@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "servers": {
+      "team-mcp": {
+        "type": "remote",
+        "url": "https://mcp.example.org/mcp",
+        "oauth": false,
+        "codemode": false,
+        "headers": {"Authorization": "Bearer {env:TEAM_MCP_TOKEN}"},
+        "timeout": {"execution": 15000}
+      }
+    }
+  }
+}

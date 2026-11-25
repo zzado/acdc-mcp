@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "team-mcp": {
+      "type": "http",
+      "url": "https://mcp.example.org/mcp",
+      "headers": {"Authorization": "Bearer ${TEAM_MCP_TOKEN}"},
+      "timeout": 15000
+    }
+  }
+}

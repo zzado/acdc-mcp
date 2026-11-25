@@ -5,7 +5,7 @@ world-readable mount mode for ephemeral Garage test credentials. Production
 uses the restrictive secret file permissions.
 
 ```powershell
-python deploy/create-secrets.py test-data/secrets
+python server/deploy/create-secrets.py test-data/secrets
 $env:TEAM_SECRETS_DIR = './test-data/secrets'
 $env:TEAM_MCP_HOST = 'localhost'
 $env:TEAM_S3_HOST = '127.0.0.1'
@@ -13,15 +13,15 @@ $env:TEAM_TLS_DIRECTIVE = 'tls internal'
 $env:TEAM_TRANSFER_GRACE = '3'
 $env:TEAM_GET_TTL = '15'
 $env:TEAM_UV_FLAGS = '--dev'
-docker compose -p team-mcp-test -f compose.yaml -f tests/compose.test.yaml up -d --build --wait
-docker compose -p team-mcp-test -f compose.yaml -f tests/compose.test.yaml cp reverse-proxy:/data/caddy/pki/authorities/local/root.crt test-data/root.crt
+docker compose -p team-mcp-test -f compose.yaml -f server/tests/compose.test.yaml up -d --build --wait
+docker compose -p team-mcp-test -f compose.yaml -f server/tests/compose.test.yaml cp reverse-proxy:/data/caddy/pki/authorities/local/root.crt test-data/root.crt
 $env:TEAM_TEST_COMPOSE = '1'
-uv run --no-project --with pytest==9.2.0 python -m pytest tests/test_compose.py -m 'not large'
+uv run --no-project --with pytest==9.2.0 python -m pytest server/tests/test_compose.py -m 'not large'
 ```
 
 Run unit tests in the dev-enabled Team MCP image so they use the pinned
 Python and SQLite. Mount the repository read-only at `/src` and run
-`python -m pytest -p no:cacheprovider /src/tests/test_collaboration.py`.
+`python -m pytest -p no:cacheprovider /src/server/tests/test_collaboration.py`.
 Run `test_garage_recovery.py` from the same image on the Compose storage
 network with `TEAM_TEST_INTERNAL=1` to exercise a lost Garage copy response.
 

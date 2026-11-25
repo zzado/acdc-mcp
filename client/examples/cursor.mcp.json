@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "team-mcp": {
+      "url": "https://mcp.example.org/mcp",
+      "headers": {"Authorization": "Bearer ${env:TEAM_MCP_TOKEN}"}
+    }
+  }
+}
