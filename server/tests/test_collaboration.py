@@ -137,6 +137,42 @@ def test_shared_state_cas_and_recreate(team):
     assert collab.write_state(first, channel, "round", {"number": 3}, 2, "three")["revision"] == 3
 
 
+def test_event_checkpoint_owner_position_and_upgrade(team):
+    collab, security, (reader, peer, other), _ = team
+    start = collab.read_events(reader, 0, None, 10)
+    dm = collab.send_message(peer, "fixture", "dm", None, reader.agent_id, None, "chat", [])
+    foreign = collab.read_events(other, 0, None, 10)
+    assert foreign["events"] == [] and foreign["next_event_id"] >= dm["event_id"]
+    with security.db.transaction() as cx:
+        legacy_epoch = cx.execute("SELECT value FROM settings WHERE key='event_epoch'").fetchone()[0]
+    for epoch in (foreign["event_epoch"], start["event_epoch"], legacy_epoch, None):
+        with pytest.raises(DomainError) as reset:
+            asyncio.run(collab.wait_events(reader, foreign["next_event_id"], epoch, 10, 1))
+        assert reset.value.body["code"] == "CURSOR_RESET"
+
+    first = collab.read_events(reader, 0, None, 1)
+    assert first["has_more"]
+    with security.db.transaction(write=True) as cx:
+        token = security.issue(cx, reader.agent_id, now() + 60)
+        sibling_id = uuid4().hex
+        cx.execute("INSERT INTO agents(id,user_id,created_at) VALUES (?,?,?)", (sibling_id, reader.user_id, now()))
+        sibling_token = security.issue(cx, sibling_id, now() + 60)
+    sibling = security.authenticate(sibling_token)
+    assert collab.read_events(sibling, 0, None, 20)["events"] == []
+    with pytest.raises(DomainError) as reset:
+        collab.read_events(sibling, first["next_event_id"], first["event_epoch"], 1)
+    assert reset.value.body["code"] == "CURSOR_RESET"
+    resumed = Collaboration(security.db, security).read_events(
+        security.authenticate(token), first["next_event_id"], first["event_epoch"], 1)
+    assert [row["id"] for row in resumed["events"]] == [dm["event_id"]]
+    with security.db.transaction(write=True) as cx:
+        cx.execute("UPDATE settings SET value=? WHERE key='event_epoch'", (uuid4().hex,))
+    with pytest.raises(DomainError) as reset:
+        collab.read_events(reader, resumed["next_event_id"], resumed["event_epoch"], 1)
+    assert reset.value.body["code"] == "CURSOR_RESET"
+    assert collab.read_events(other, 0, None, 20)["events"] == []
+
+
 @pytest.mark.parametrize("letter", ["한", "𐐀"])
 def test_state_cursor_round_trips_maximum_unicode_keys(team, letter):
     collab, _, (writer, reader, _), _ = team
@@ -177,6 +213,101 @@ def test_non_ascii_cursor_is_validation_error(tool_server):
     assert result.is_error
     assert result.structured_content["error"]["code"] == "VALIDATION"
     assert result.structured_content["error"]["retryable"] is False
+
+
+def test_reply_target_errors_are_indistinguishable(tool_server, team):
+    mcp, _ = tool_server
+    collab, _, (_, sender, peer), _ = team
+    dm = collab.send_message(sender, "fixture", "dm", None, peer.agent_id, None, "chat", [])
+
+    async def check():
+        async with Client(mcp) as client:
+            errors = []
+            for target in (dm["id"], dm["id"] + 1):
+                args = {"reply_to_id": target, "content": "reply", "idempotency_key": "reply"}
+                result = await client.call_tool("send_message", args, raise_on_error=False)
+                assert result.is_error and result.structured_content["error"]["code"] == "NOT_FOUND"
+                errors.append((result.structured_content, result.content))
+            assert errors[0] == errors[1]
+
+    asyncio.run(check())
+    args = (peer, "reply", "reply", None, None, dm["id"], "chat", [])
+    reply = collab.send_message(*args)
+    assert reply["thread_root_id"] == dm["id"] and collab.send_message(*args) == reply
+
+
+@pytest.mark.parametrize("tool,name", [
+    ("register_agent", "A\0B"), ("register_agent", "A\u202eB"),
+    ("create_channel", "A\nB"), ("create_channel", "A\n"),
+    ("create_channel", "A\u2028B"), ("register_agent", "A\u2067B"),
+])
+def test_display_name_rejected_before_write(team, tool_server, tool, name):
+    collab, _, (owner, _, _), _ = team
+    mcp, _ = tool_server
+
+    async def check():
+        async with Client(mcp) as client:
+            args = {"name": name}
+            if tool == "create_channel":
+                args["idempotency_key"] = "display"
+            result = await client.call_tool(tool, args, raise_on_error=False)
+            assert result.is_error and result.structured_content["error"]["code"] == "VALIDATION"
+
+    asyncio.run(check())
+    assert collab.list_agents(owner, owner.agent_id, None, 1)["items"][0]["name"] == "first"
+    assert collab.list_channels(owner, None, 20)["items"] == []
+
+
+def test_unicode_channel_names_keep_existing_uniqueness(team):
+    collab, _, (owner, _, _), _ = team
+    names = ["Room", "É", "é", "e\u0301", "라운드", "مرحلة"]
+    created = [collab.create_channel(owner, name, str(i))["id"] for i, name in enumerate(names)]
+    assert len(set(created)) == len(names)
+    with pytest.raises(DomainError) as duplicate:
+        collab.create_channel(owner, "rOOM", "other")
+    assert duplicate.value.body["code"] == "CONFLICT"
+
+
+def test_legacy_display_names_and_committed_receipt(team):
+    collab, security, (owner, _, _), _ = team
+    receipt = collab.create_channel(owner, "fixture", "legacy")
+    name = "old\nname"
+    receipt["name"] = name
+    with security.db.transaction(write=True) as cx:
+        cx.execute("UPDATE channels SET name=? WHERE id=?", (name, receipt["id"]))
+        cx.execute("UPDATE agents SET name=? WHERE id=?", (name, owner.agent_id))
+        cx.execute("UPDATE idempotency_keys SET request_hash=?, result=? WHERE agent_id=? AND tool=? AND key=?",
+                   (db_module.digest([name, "team"]), db_module.canonical(receipt), owner.agent_id,
+                    "create_channel", "legacy"))
+    assert collab.list_channels(owner, None, 1)["items"][0]["name"] == name
+    assert collab.list_agents(owner, owner.agent_id, None, 1)["items"][0]["name"] == name
+    assert collab.create_channel(owner, name, "legacy") == receipt
+    with pytest.raises(DomainError) as invalid:
+        collab.create_channel(owner, name, "fresh")
+    assert invalid.value.body["code"] == "VALIDATION"
+
+
+def test_unicode_state_key_schema_and_storage(tool_server, team):
+    mcp, _ = tool_server
+    collab, _, (owner, _, _), _ = team
+    channel = collab.create_channel(owner, "keys", "room")["id"]
+
+    async def check():
+        async with Client(mcp) as client:
+            catalog = {t.name: t for t in await client.list_tools()}
+            for tool in ("get_state", "set_state", "delete_state"):
+                assert r"\w" not in catalog[tool].input_schema["properties"]["key"].get("pattern", "")
+            for i, key in enumerate(("라운드.1", "e\u0301", "𐐀-key")):
+                target = {"channel_id": channel, "key": key}
+                await client.call_tool("set_state", target | {"value": i, "expected_revision": 0,
+                                                              "idempotency_key": str(i)})
+                result = await client.call_tool("get_state", target)
+                assert result.structured_content["value"] == i
+            invalid = await client.call_tool("get_state", {"channel_id": channel, "key": "two words"},
+                                             raise_on_error=False)
+            assert invalid.is_error and invalid.structured_content["error"]["code"] == "VALIDATION"
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("limit", [True, "1", 1, 1.0, 1.5, 0, 51])

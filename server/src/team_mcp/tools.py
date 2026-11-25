@@ -23,9 +23,15 @@ Cursor = Annotated[str, StringConstraints(max_length=1024)]
 Text = Annotated[str, StringConstraints(max_length=512)]
 Query = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+DisplayName = Annotated[str, Field(min_length=1, max_length=80,
+                                   description="New names must be nonblank, single-line and free of control "
+                                               "and bidi formatting characters.")]
 Filename = Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\x00-\x1f\\]+$")]
 IdemKey = Annotated[str, StringConstraints(min_length=1, max_length=128)]
-StateKey = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
+# Share ASCII rules across regex engines. Pydantic checks Unicode word characters on the server.
+StateKey = Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[\w.-]+$"),
+                     Field(description="Unicode word characters, dot or hyphen; keys are case-sensitive.",
+                           json_schema_extra={"pattern": r"^(?:[A-Za-z0-9._-]|[^\u0000-\u007f])+$"})]
 Tag = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
 Part = Annotated[int, Field(ge=1, le=10_000)]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")]
@@ -137,7 +143,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
         return decorate
 
     @tool("id", "name")
-    def register_agent(who, name: Name, description: Text = "", runtime: Name | None = None):
+    def register_agent(who, name: DisplayName, description: Text = "", runtime: Name | None = None):
         """Set your Agent profile on the identity assigned to this token."""
         return collaboration.register_agent(who, name, description, runtime)
 
@@ -147,7 +153,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
         return collaboration.list_agents(who, agent_id, cursor, limit)
 
     @tool("id", "name", "kind")
-    def create_channel(who, name: Name, idempotency_key: IdemKey,
+    def create_channel(who, name: DisplayName, idempotency_key: IdemKey,
                        visibility: Literal["team"] = "team"):
         """Create a channel shared by every team member."""
         # Keep the explicit visibility argument accepted by earlier clients.
@@ -179,7 +185,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
     @tool("events", "next_event_id", "event_epoch", "has_more")
     async def read_events(who, after_event_id: Nonnegative = 0, event_epoch: Identifier | None = None,
                           wait_ms: Annotated[int, Field(ge=0, le=2000)] = 0, limit: Limit = 20):
-        """Read changes after a saved event ID and epoch, optionally waiting up to two seconds."""
+        """Resume with this Agent's paired event ID and epoch. On CURSOR_RESET start at 0 without an epoch."""
         return await collaboration.wait_events(who, after_event_id, event_epoch, wait_ms, limit)
 
     @tool(**UPLOAD_STATUS)

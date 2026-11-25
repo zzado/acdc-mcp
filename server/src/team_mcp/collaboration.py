@@ -1,10 +1,20 @@
 import asyncio
+import hmac
 import json
+import re
 import sqlite3
 from uuid import uuid4
 
 from .db import DomainError, canonical, event, idempotent, iso, now
 from .security import CHANNEL_VISIBLE, accessible_channel, require_active_credential
+
+
+DISPLAY_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]")
+
+
+def validate_display_name(name):
+    if not name.strip() or DISPLAY_CONTROLS.search(name):
+        raise DomainError("VALIDATION", "Use a nonblank, single-line name without control or bidi formatting characters")
 
 
 def view(row):
@@ -28,9 +38,10 @@ class Collaboration:
         return {"items": [format_item(row) for row in rows[:limit]], "next_cursor": next_cursor}
 
     def register_agent(self, who, name, description, runtime):
+        validate_display_name(name)
         with self.db.transaction(write=True) as cx:
             cx.execute("UPDATE agents SET name=?,description=?,runtime=?,last_seen_at=? WHERE id=?",
-                       (name, description, runtime, now(), who.agent_id))
+                       (name.strip(), description, runtime, now(), who.agent_id))
             return view(cx.execute("SELECT * FROM agents WHERE id=?", (who.agent_id,)).fetchone())
 
     def list_agents(self, who, agent_id, cursor, limit):
@@ -49,18 +60,21 @@ class Collaboration:
             return self.page(who, "agents", agent_id, cursor, limit, lambda row: row["id"], read, format_agent)
 
     def create_channel(self, who, name, key):
+        stored_name = name.strip()
         with self.db.transaction(write=True) as cx:
             def create():
+                # Previously committed requests can still replay their original receipt.
+                validate_display_name(name)
                 channel = uuid4().hex
                 try:
                     cx.execute("INSERT INTO channels(id,name,kind,creator_id,created_at) VALUES (?,?,'team',?,?)",
-                               (channel, name, who.agent_id, now()))
+                               (channel, stored_name, who.agent_id, now()))
                 except sqlite3.IntegrityError:
                     raise DomainError("CONFLICT", "Channel name is already in use") from None
                 event(cx, "channel.created", channel, channel)
                 return view(cx.execute("SELECT * FROM channels WHERE id=?", (channel,)).fetchone())
 
-            result = idempotent(cx, who.agent_id, "create_channel", key, [name, "team"], create)
+            result = idempotent(cx, who.agent_id, "create_channel", key, [stored_name, "team"], create)
             accessible_channel(cx, who.agent_id, result["id"])
             return result
 
@@ -80,7 +94,10 @@ class Collaboration:
             reply = None
             new_dm = None
             if reply_to_id is not None:
-                reply = cx.execute("SELECT * FROM messages WHERE id=?", (reply_to_id,)).fetchone()
+                reply = cx.execute(f"""
+                    SELECT m.* FROM messages m JOIN channels c ON c.id=m.channel_id
+                    WHERE m.id=:id AND {CHANNEL_VISIBLE}
+                    """, {"id": reply_to_id, "agent": who.agent_id}).fetchone()
                 if reply is None:
                     raise DomainError("NOT_FOUND", "Message not found")
                 channel_id = reply["channel_id"]
@@ -94,7 +111,7 @@ class Collaboration:
                 else:
                     channel_id = uuid4().hex
                     new_dm = (first, second)
-            if new_dm is None:
+            if reply is None and new_dm is None:
                 accessible_channel(cx, who.agent_id, channel_id)
 
             def send():
@@ -153,9 +170,14 @@ class Collaboration:
     def read_events(self, who, after, epoch, limit):
         with self.db.transaction() as cx:
             require_active_credential(cx, who)
-            current = cx.execute("SELECT value FROM settings WHERE key='event_epoch'").fetchone()[0]
+            generation = cx.execute("SELECT value FROM settings WHERE key='event_epoch'").fetchone()[0]
             water = cx.execute("SELECT COALESCE(max(id),0) FROM events").fetchone()[0]
-            if (epoch is not None and epoch != current) or (after and epoch is None) or after > water:
+            if epoch is None:
+                valid = after == 0
+            else:
+                expected = self.security.event_checkpoint(who.agent_id, generation, after)
+                valid = epoch.isascii() and hmac.compare_digest(epoch, expected)
+            if not valid or after > water:
                 raise DomainError("CURSOR_RESET", "Restart event synchronization from event 0")
             rows = cx.execute(f"""
                 SELECT e.id,e.kind,e.entity_id,e.channel_id,e.data,e.created_at
@@ -166,9 +188,10 @@ class Collaboration:
                 """, {"after": after, "water": water, "user": who.user_id, "agent": who.agent_id,
                       "count": limit + 1}).fetchall()
             more = len(rows) > limit
+            next_id = rows[limit - 1]["id"] if more else water
+            checkpoint = self.security.event_checkpoint(who.agent_id, generation, next_id)
             return {"events": [view(row) | {"data": json.loads(row["data"])} for row in rows[:limit]],
-                    "next_event_id": rows[limit - 1]["id"] if more else water,
-                    "event_epoch": current, "has_more": more}
+                    "next_event_id": next_id, "event_epoch": checkpoint, "has_more": more}
 
     async def wait_events(self, who, after, epoch, wait_ms, limit):
         if wait_ms == 0:

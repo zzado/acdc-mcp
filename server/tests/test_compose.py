@@ -191,6 +191,24 @@ def test_tool_input_validation(team, modern):
     assert client.tool("send_message", **message)["content"] == "hello"
 
 
+@pytest.mark.parametrize("modern", [False, True])
+def test_nested_state_error_boundary(team, modern):
+    writer, _, _, credentials, tls = team
+    client = Client(credentials[0]["token"], tls, modern=True) if modern else writer
+    target = {"channel_id": channel(writer), "key": "nested"}
+    value = None
+    for _ in range(256):
+        value = [value]
+    args = target | {"value": value, "expected_revision": 0, "idempotency_key": "nested"}
+    if modern:
+        client.tool("set_state", **args, error="VALIDATION")
+    else:
+        with pytest.raises(HTTPError) as rejected:
+            client.tool("set_state", **args)
+        assert rejected.value.code == 400 and "error" in json.load(rejected.value)
+    assert client.tool("get_state", **target)["revision"] == 0
+
+
 def test_upload_download_and_immutability(team):
     writer, reader, teammate, _, tls = team
     shared = channel(writer)

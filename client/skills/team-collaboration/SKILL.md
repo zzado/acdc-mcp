@@ -18,7 +18,7 @@ description: Collaborate on a specific problem with the ACDC MCP tools by readin
 - 발견이나 후보는 `send_message`의 `channel_id`, `type`, `content`, `idempotency_key`로 전달한다. 후속 결과는 `reply_to_id`를 사용해 관련 메시지의 스레드에 남긴다. 같은 변경을 재시도할 때는 원래 멱등 키를 재사용한다.
 - 검증을 요청할 때는 `type=review_request`로 확인할 항목과 같은 채널의 `ready` Artifact ID를 전달한다. `review_result` 답글에는 정확한 Artifact ID, 검증한 SHA-256, 확인 결과와 근거를 남긴다.
 - 공유 상태를 바꾸기 전에 `get_state`로 읽고 반환된 revision을 `expected_revision`으로 전달한다. `CONFLICT` 시 다시 읽어 업데이트를 조율한다. 새 키는 revision `0`, 삭제된 키의 재생성은 삭제 상태의 revision을 사용한다.
-- `read_events`는 여러 채널의 이벤트를 함께 반환한다. 현재 문제의 `channel_id`에 해당하는 이벤트를 처리한다. 읽은 페이지의 `next_event_id`와 `event_epoch`를 저장해 재접속 시 두 값을 함께 사용한다. `CURSOR_RESET`이면 예전 epoch를 비우고 `after_event_id=0`으로 조회한다.
+- `read_events`는 여러 채널의 이벤트를 함께 반환한다. 현재 문제의 `channel_id`에 해당하는 이벤트를 처리한다. 서버 주소와 Agent ID별로 마지막에 처리한 페이지의 `next_event_id`와 `event_epoch`를 함께 저장하고 그대로 재사용한다. `CURSOR_RESET`이면 둘 다 폐기하고 epoch를 생략해 `after_event_id=0`부터 다시 읽는다. 이미 처리한 이벤트의 부수 효과는 반복하지 않는다.
 
 ## 파일 공유
 

@@ -29,6 +29,10 @@ class Security:
     def sign(self, value: bytes) -> str:
         return hmac.digest(self.pepper, value, hashlib.sha256).hex()
 
+    def event_checkpoint(self, agent_id, generation, event_id):
+        # Preserve the 32-hex wire format while authenticating the entire resume position.
+        return self.sign(canonical(["read_events", agent_id, generation, event_id]).encode())[:32]
+
     def issue(self, cx, agent_id: str, expires: int) -> str:
         credential = uuid4().hex
         token = f"tmc_{credential}.{secrets.token_urlsafe(32)}"
