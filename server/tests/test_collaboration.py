@@ -1,11 +1,15 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from team_mcp import db as db_module
 from team_mcp.collaboration import Collaboration
-from team_mcp.db import Database, DomainError, now
+from team_mcp.db import Database, DomainError, event, now
 from team_mcp.security import Security
+from team_mcp.storage import Storage
 
 
 @pytest.fixture
@@ -18,14 +22,16 @@ def team(tmp_path):
         for name in ("first", "second", "third"):
             user, agent = uuid4().hex, uuid4().hex
             cx.execute("INSERT INTO users VALUES (?,?,'member',NULL)", (user, name))
-            cx.execute("INSERT INTO agents(id,user_id,name,created_at) VALUES (?,?,?,?)", (agent, user, name, now()))
+            profile = name if name != "third" else None
+            cx.execute("INSERT INTO agents(id,user_id,name,created_at) VALUES (?,?,?,?)",
+                       (agent, user, profile, now()))
             tokens.append(sec.issue(cx, agent, now() + 60))
     return Collaboration(db, sec), sec, [sec.authenticate(token) for token in tokens], tokens
 
 
 def test_messages_concurrency_and_idempotency(team):
     collab, _, (first, second, _), _ = team
-    channel = collab.create_channel(first, "Round 1", "team", "channel")["id"]
+    channel = collab.create_channel(first, "Round 1", "channel")["id"]
 
     def send(index):
         return collab.send_message(first if index % 2 else second, f"발견_%{index}", str(index),
@@ -45,29 +51,32 @@ def test_messages_concurrency_and_idempotency(team):
         collab.read_messages(second, channel, "발견_%", None, page["next_cursor"], 50)
 
 
-def test_acl_dm_and_incremental_events(team):
+def test_team_channels_dm_and_incremental_events(team):
     collab, sec, (first, second, third), tokens = team
-    private = collab.create_channel(first, "Private", "private", "private")["id"]
+    first_channel = collab.create_channel(first, "Problem A", "problem-a")["id"]
+    second_channel = collab.create_channel(third, "Problem B", "problem-b")["id"]
     direct = collab.send_message(first, "Direct", "dm", None, second.agent_id, None, "chat", [])
-    team_channel = collab.create_channel(first, "Public", "team", "public")["id"]
+    assert {c["id"] for c in collab.list_channels(third, None, 50)["items"]} == {first_channel, second_channel}
+    assert collab.list_agents(first, third.agent_id, None, 20)["items"][0]["name"] == "third"
     start = collab.read_events(third, 0, None, 50)
-    assert {e["channel_id"] for e in start["events"]} == {team_channel}
-    public = collab.send_message(first, "Public", "next", team_channel, None, None, "chat", [])
+    assert {e["channel_id"] for e in start["events"]} == {first_channel, second_channel}
+    public = collab.send_message(third, "Public", "next", first_channel, None, None, "chat", [])
     changes = collab.read_events(third, start["next_event_id"], start["event_epoch"], 1)
     assert [e["id"] for e in changes["events"]] == [public["event_id"]]
     assert not changes["has_more"]
     assert len(collab.read_messages(second, direct["channel_id"], None, None, None, 20)["items"]) == 1
-    for channel in (private, direct["channel_id"]):
-        with pytest.raises(DomainError, match="not found"):
-            collab.read_messages(third, channel, None, None, None, 20)
+    with pytest.raises(DomainError, match="not found"):
+        collab.read_messages(third, direct["channel_id"], None, None, None, 20)
     with sec.db.transaction(write=True) as cx:
         cx.execute("UPDATE credentials SET revoked_at=? WHERE id=?", (now(), second.credential_id))
+        cx.execute("UPDATE users SET disabled_at=? WHERE id=?", (now(), third.user_id))
     assert sec.authenticate(tokens[1]) is None
+    assert sec.authenticate(tokens[2]) is None
 
 
 def test_shared_state_cas_and_recreate(team):
     collab, _, (first, second, _), _ = team
-    channel = collab.create_channel(first, "State", "team", "state")["id"]
+    channel = collab.create_channel(first, "State", "state")["id"]
     assert collab.get_state(first, channel, "round")["revision"] == 0
     new = collab.write_state(first, channel, "round", {"number": 1}, 0, "one")
     assert new["revision"] == 1
@@ -77,3 +86,47 @@ def test_shared_state_cas_and_recreate(team):
     assert collab.write_state(second, channel, "round", None, 1, "delete", deleted=True)["revision"] == 2
     assert collab.get_state(first, channel, "round")["deleted"]
     assert collab.write_state(first, channel, "round", {"number": 3}, 2, "three")["revision"] == 3
+
+
+def test_migration_shares_existing_private_channel_and_preserves_content(tmp_path):
+    db = Database(tmp_path / "legacy.sqlite")
+    initial = Path(db_module.__file__).with_name("migrations") / "001_initial.sql"
+    with sqlite3.connect(db.path) as cx:
+        cx.executescript(initial.read_text(encoding="utf-8") + "\nPRAGMA user_version=1;")
+    sec = Security(db, "a" * 64)
+    collab = Collaboration(db, sec)
+    owner, reader, channel, artifact, epoch = (uuid4().hex for _ in range(5))
+    with db.transaction(write=True) as cx:
+        cx.executemany("INSERT INTO users VALUES (?,?,'member',NULL)", [(owner, "owner"), (reader, "reader")])
+        cx.executemany("INSERT INTO agents(id,user_id,created_at) VALUES (?,?,?)",
+                       [(owner, owner, now()), (reader, reader, now())])
+        token = sec.issue(cx, reader, now() + 60)
+        cx.execute("INSERT INTO settings VALUES ('event_epoch',?)", (epoch,))
+        cx.execute("INSERT INTO channels VALUES (?,?,'private',?,NULL,NULL,?)", (channel, "Problem A", owner, now()))
+        cx.execute("INSERT INTO channel_members VALUES (?,?)", (channel, owner))
+        message = cx.execute("""
+            INSERT INTO messages(channel_id,sender_id,type,content,created_at) VALUES (?,?,'chat','Earlier notes',?)
+            """, (channel, owner, now())).lastrowid
+        cx.execute("""
+            INSERT INTO artifacts(id,channel_id,uploader_id,filename,content_type,size,claimed_sha256,object_key,
+                                  description,tags,status,created_at)
+            VALUES (?,?,?,'old.bin','application/octet-stream',5,?,'existing-object','','[]','ready',?)
+            """, (artifact, channel, owner, "a" * 64, now()))
+        cx.execute("INSERT INTO message_artifacts VALUES (?,?)", (message, artifact))
+        cx.execute("INSERT INTO channel_state VALUES (?,'round','1',1,0,?,?)", (channel, owner, now()))
+        event(cx, "message.created", message, channel)
+    db.migrate()
+    db.migrate()
+    who = sec.authenticate(token)
+    assert [(row["id"], row["kind"]) for row in collab.list_channels(who, None, 20)["items"]] == [(channel, "team")]
+    notes = collab.read_messages(who, channel, None, None, None, 20)["items"][0]
+    assert notes["content"] == "Earlier notes" and notes["artifact_ids"] == [artifact]
+    assert collab.get_state(who, channel, "round")["value"] == 1
+    with pytest.raises(DomainError) as reset:
+        collab.read_events(who, 1, epoch, 20)
+    assert reset.value.body["code"] == "CURSOR_RESET"
+    assert collab.read_events(who, 0, None, 20)["events"][0]["entity_id"] == str(message)
+    with db.transaction() as cx:
+        assert Storage.get_ready(cx, who, artifact)["object_key"] == "existing-object"
+        assert cx.execute("PRAGMA foreign_key_check").fetchone() is None
+        assert not cx.execute("SELECT 1 FROM sqlite_schema WHERE name='channel_members'").fetchone()

@@ -58,15 +58,15 @@ def output_schema(fields):
 
 
 def install_tools(mcp, collaboration, storage, security, rate):
-    def tool(*fields, bootstrap=False):
+    def tool(*fields):
         def decorate(function):
             @wraps(function)
             async def call(*args, **kwargs):
                 try:
                     token = get_access_token()
                     who = await asyncio.to_thread(security.authenticate, token.token) if token else None
-                    if not who or (not bootstrap and not who.registered):
-                        raise DomainError("FORBIDDEN", "Register the Agent with its current token first")
+                    if not who:
+                        raise DomainError("FORBIDDEN", "An active Agent token is required")
                     rate.take(("tool", who.agent_id))
                     if asyncio.iscoroutinefunction(function):
                         result = await function(who, *args, **kwargs)
@@ -101,25 +101,26 @@ def install_tools(mcp, collaboration, storage, security, rate):
             return mcp.tool(call, output_schema=output_schema(fields))
         return decorate
 
-    @tool("id", "name", bootstrap=True)
+    @tool("id", "name")
     def register_agent(who, name: Name, description: Text = "", runtime: Name | None = None):
         """Set your Agent profile on the identity assigned to this token."""
         return collaboration.register_agent(who, name, description, runtime)
 
     @tool(*PAGE)
     def list_agents(who, agent_id: Identifier | None = None, cursor: Cursor | None = None, limit: Limit = 20):
-        """List registered Agents and their recent activity or inspect one Agent by ID."""
+        """List team Agents and their recent activity or inspect one Agent by ID."""
         return collaboration.list_agents(who, agent_id, cursor, limit)
 
     @tool("id", "name", "kind")
     def create_channel(who, name: Name, idempotency_key: IdemKey,
-                       visibility: Literal["team", "private"] = "team"):
-        """Create a team channel or a private channel."""
-        return collaboration.create_channel(who, name, visibility, idempotency_key)
+                       visibility: Literal["team"] = "team"):
+        """Create a channel shared by every team member."""
+        # Keep the explicit visibility argument accepted by earlier clients.
+        return collaboration.create_channel(who, name, idempotency_key)
 
     @tool(*PAGE)
     def list_channels(who, cursor: Cursor | None = None, limit: Limit = 20):
-        """List accessible team channels, private channels and DMs."""
+        """List all team channels and the Agent's own DMs."""
         return collaboration.list_channels(who, cursor, limit)
 
     @tool("id", "channel_id", "sender_id", "type", "content", "event_id")

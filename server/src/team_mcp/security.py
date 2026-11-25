@@ -17,8 +17,6 @@ class Principal:
     agent_id: str
     user_id: str
     credential_id: str
-    role: str
-    registered: bool
 
 
 class Security:
@@ -45,18 +43,18 @@ class Security:
             return None
         with self.db.transaction() as cx:
             row = cx.execute("""
-                SELECT c.token_hash,c.expires_at,c.revoked_at,a.*,u.role,u.disabled_at
+                SELECT c.token_hash,c.expires_at,c.revoked_at,a.id,a.user_id,a.last_seen_at,u.disabled_at
                 FROM credentials c JOIN agents a ON a.id=c.agent_id JOIN users u ON u.id=a.user_id
                 WHERE c.id=?
                 """, (prefix[4:],)).fetchone()
         if (not row or row["revoked_at"] is not None or row["disabled_at"] is not None
                 or row["expires_at"] <= now() or not hmac.compare_digest(self.sign(token.encode()), row["token_hash"])):
             return None
-        if row["name"] and (row["last_seen_at"] or 0) <= now() - 30:
+        if (row["last_seen_at"] or 0) <= now() - 30:
             with self.db.transaction(write=True) as cx:
                 cx.execute("UPDATE agents SET last_seen_at=? WHERE id=? AND coalesce(last_seen_at,0)<=?",
                            (now(), row["id"], now() - 30))
-        return Principal(row["id"], row["user_id"], prefix[4:], row["role"], bool(row["name"]))
+        return Principal(row["id"], row["user_id"], prefix[4:])
 
     def cursor(self, binding, position):
         payload = base64.urlsafe_b64encode(canonical([binding, position]).encode()).decode().rstrip("=")
@@ -79,7 +77,6 @@ class Security:
 
 CHANNEL_VISIBLE = """(
     c.kind='team' OR
-    (c.kind='private' AND EXISTS (SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.user_id=:user)) OR
     (c.kind='dm' AND :agent IN (c.dm_first,c.dm_second))
 )"""
 
@@ -92,11 +89,9 @@ def require_active_credential(cx, who):
         raise DomainError("FORBIDDEN", "This Agent's credential is unavailable")
 
 
-def accessible_channel(cx, who, channel_id):
-    if not who.registered:
-        raise DomainError("FORBIDDEN", "Register the Agent first")
+def accessible_channel(cx, agent_id, channel_id):
     row = cx.execute(f"SELECT c.* FROM channels c WHERE c.id=:channel AND {CHANNEL_VISIBLE}",
-                     {"channel": channel_id, "user": who.user_id, "agent": who.agent_id}).fetchone()
+                     {"channel": channel_id, "agent": agent_id}).fetchone()
     if not row:
         raise DomainError("NOT_FOUND", "Channel or object not found")
     return row

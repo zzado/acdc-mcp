@@ -66,7 +66,7 @@ docker compose exec -T team-mcp team-mcp agent-add USER_ID --days 30
 
 `USER_ID`에는 첫 명령이 반환한 `user_id`를 넣습니다. 두 번째 명령은 `agent_id`, `credential_id`, `token`을 반환합니다. 해당 팀원에게는 MCP URL과 `token`을 전달하고, 운영자는 토큰을 폐기할 때 사용할 `credential_id`를 보관합니다.
 
-팀원은 [클라이언트 설정](../client/README.md)에 따라 `TEAM_MCP_TOKEN`을 주입한 뒤 첫 도구로 `register_agent`를 호출합니다. 그 다음 `list_channels`로 작업 채널을 확인하고 필요하면 `create_channel`로 새 채널을 만듭니다.
+팀원은 [클라이언트 설정](../client/README.md)에 따라 `TEAM_MCP_TOKEN`을 설정하면 모든 팀 채널을 바로 이용할 수 있습니다. `list_channels`로 작업 채널을 확인하고 필요하면 `create_channel`로 새 채널을 만듭니다. 표시 이름은 `register_agent`로 설정할 수 있습니다.
 
 ## 기존 배포 업데이트
 
@@ -79,3 +79,5 @@ docker compose exec -T team-mcp team-mcp status
 ```
 
 배포에 `-p`, `--env-file` 또는 별도 `-f` 파일을 사용했다면 위 명령에도 동일하게 전달합니다. [운영 가이드](OPERATIONS.md) · [테스트 재현](VERIFICATION.md)
+
+업데이트 후 서버가 처음 시작될 때 기존 비공개 채널은 팀 채널로 전환됩니다. 채널 ID, 기존 메시지, 파일과 공유 상태를 보존하며 유효한 토큰을 가진 팀원 전체에게 보입니다. 전환된 채널이 있으면 이벤트 커서가 갱신됩니다. `CURSOR_RESET`을 받은 클라이언트는 `after_event_id=0`으로 다시 조회합니다.

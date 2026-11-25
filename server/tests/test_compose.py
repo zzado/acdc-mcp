@@ -83,12 +83,11 @@ def team():
     tls = ssl.create_default_context(cafile=REPO_ROOT / "test-data/root.crt")
     clients = []
     credentials = []
-    for name in ("writer", "reader", "outsider"):
+    for name in ("writer", "reader", "teammate"):
         user = compose("exec", "-T", "team-mcp", "team-mcp", "user-add", f"{name}-{uuid4().hex[:8]}")
         agent = compose("exec", "-T", "team-mcp", "team-mcp", "agent-add", json.loads(user)["user_id"])
         credential = json.loads(agent)
         client = Client(credential["token"], tls)
-        client.tool("register_agent", name=name, runtime="integration")
         clients.append(client)
         credentials.append(credential)
     return *clients, credentials, tls
@@ -123,19 +122,23 @@ def reserve(client, channel, filename, payload, *, sha=None):
                        sha256=content_hash, idempotency_key=uuid4().hex)
 
 
-def channel(client, visibility="team"):
-    return client.tool("create_channel", name=uuid4().hex, idempotency_key=uuid4().hex,
-                       visibility=visibility)["id"]
+def channel(client):
+    return client.tool("create_channel", name=uuid4().hex, idempotency_key=uuid4().hex)["id"]
 
 
 def test_messages_auth_and_events(team):
-    writer, reader, outsider, credentials, tls = team
+    writer, reader, teammate, credentials, tls = team
     modern = Client(credentials[0]["token"], tls, modern=True)
     assert len(modern.rpc("tools/list", {})["tools"]) == 19
     assert modern.tool("list_agents")["items"]
-    private = channel(writer, "private")
-    outsider.tool("read_messages", channel_id=private, error="NOT_FOUND")
-    shared = channel(writer)
+    created = writer.tool("create_channel", name=uuid4().hex, idempotency_key=uuid4().hex, visibility="team")
+    assert created["kind"] == "team"
+    shared = created["id"]
+    assert shared in {item["id"] for item in teammate.tool("list_channels")["items"]}
+    direct = writer.tool("send_message", dm_agent_id=credentials[1]["agent_id"],
+                         content="Direct message", idempotency_key=uuid4().hex)
+    assert reader.tool("read_messages", channel_id=direct["channel_id"])["items"][0]["content"] == "Direct message"
+    teammate.tool("read_messages", channel_id=direct["channel_id"], error="NOT_FOUND")
     checkpoint = reader.tool("read_events")
 
     def send(index):
@@ -157,12 +160,10 @@ def test_messages_auth_and_events(team):
 
 
 def test_upload_download_and_immutability(team):
-    writer, reader, outsider, credentials, tls = team
-    private = channel(writer, "private")
-    reader_user = writer.tool("list_agents", agent_id=credentials[1]["agent_id"])["items"][0]["user_id"]
-    compose("exec", "-T", "team-mcp", "team-mcp", "channel-grant", private, reader_user)
+    writer, reader, teammate, _, tls = team
+    shared = channel(writer)
     payload = b"team verification\n" * 1024
-    pending = reserve(writer, private, "candidate.bin", payload)
+    pending = reserve(writer, shared, "candidate.bin", payload)
     artifact, upload = pending["artifact_id"], pending["upload_id"]
     grant = writer.tool("request_upload_urls", upload_id=upload)["transfers"][0]
     assert put(tls, grant, payload) == 200
@@ -171,14 +172,19 @@ def test_upload_download_and_immutability(team):
     ready = wait_for(writer, upload, "ready")
     assert ready["verified_sha256"] == hashlib.sha256(payload).hexdigest()
     assert put(tls, grant, b"\x00" * len(payload)) == 403
-    outsider.tool("request_download", artifact_id=artifact, error="NOT_FOUND")
+    assert teammate.tool("get_artifact", artifact_id=artifact)["verified_sha256"] == ready["verified_sha256"]
+    assert [item["id"] for item in teammate.tool("list_artifacts", channel_id=shared)["items"]] == [artifact]
+    unrelated = channel(teammate)
+    assert teammate.tool("list_artifacts", channel_id=unrelated)["items"] == []
+    teammate.tool("send_message", channel_id=unrelated, content="Wrong channel", artifact_ids=[artifact],
+                  idempotency_key=uuid4().hex, error="NOT_FOUND")
     download = reader.tool("request_download", artifact_id=artifact)
     with urlopen(download["url"], context=tls) as response:
         assert response.headers["Content-Disposition"] == "attachment"
         assert hashlib.sha256(response.read()).hexdigest() == download["sha256"]
     events = reader.tool("read_events", limit=50)["events"]
     assert sum(event["kind"] == "artifact.ready" and event["entity_id"] == artifact for event in events) == 1
-    wrong_digest = reserve(writer, private, "wrong.bin", payload, sha="0" * 64)
+    wrong_digest = reserve(writer, shared, "wrong.bin", payload, sha="0" * 64)
     bad_id = wrong_digest["upload_id"]
     assert put(tls, writer.tool("request_upload_urls", upload_id=bad_id)["transfers"][0], payload) == 200
     writer.tool("complete_upload", upload_id=bad_id)

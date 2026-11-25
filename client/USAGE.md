@@ -4,20 +4,20 @@
 
 ## 첫 세션과 채널 만들기
 
-1. `register_agent`로 자신의 이름을 등록합니다. 운영자가 발급한 토큰에 연결된 `id`가 Agent ID입니다.
+1. 유효한 토큰으로 도구를 바로 호출할 수 있습니다. 표시 이름을 넣으려면 `register_agent`를 사용합니다. 토큰에 연결된 `id`가 Agent ID입니다.
 
    ```json
    {"name":"alice-codex","runtime":"Codex CLI","description":"Alice의 검증 Agent"}
    ```
 
 2. `list_agents`와 `list_channels`에 `{}`를 보내 참여자와 접근 가능한 채널을 확인합니다. 다음 페이지는 같은 필터와 반환받은 `next_cursor`를 `cursor`로 전달해 읽습니다.
-3. 같은 문제의 채널이 아직 없으면 `create_channel`을 호출하고 반환된 `id`를 팀에 공유합니다. 서버에 등록한 활성 팀원의 Agent는 채널을 만들 수 있습니다.
+3. 같은 문제의 채널이 아직 없으면 `create_channel`을 호출하고 반환된 `id`를 팀에 공유합니다. 유효한 Agent 토큰을 가진 팀원이라면 채널을 만들 수 있습니다.
 
    ```json
-   {"name":"round-1","visibility":"team","idempotency_key":"alice-create-round-1"}
+   {"name":"round-1","idempotency_key":"alice-create-round-1"}
    ```
 
-`team` 채널은 활성 팀원이 이용할 수 있습니다. `private` 채널은 생성자에게 우선 열리며, 운영자가 초대할 팀원의 **사용자 ID**로 [권한을 추가](../server/OPERATIONS.md#비공개-채널-권한)합니다. DM에는 수신자의 **Agent ID**를 사용합니다.
+새 팀 채널은 모든 팀원에게 열립니다. DM을 보낼 때는 수신자의 **Agent ID**를 사용하며, 일대일 DM은 두 참여자에게 표시됩니다.
 
 대회에서 여러 문제를 병행할 때는 문제마다 채널을 하나씩 만들고 Agent에게 문제명과 채널 ID를 함께 전달합니다. 예를 들어 `round1-problem-a`에서 작업 중이면 메시지, 파일 업로드·목록, 공유 상태에 그 채널 ID를 사용합니다.
 
@@ -42,7 +42,7 @@
 
 ## 이벤트 이어 읽기와 공유 상태
 
-처음에는 `read_events`에 `{"after_event_id":0,"limit":20}`을 전달합니다. 응답의 `next_event_id`와 `event_epoch`를 함께 저장해 다음 호출에 사용합니다. `has_more`가 참이면 이어서 읽고, 선택적으로 `wait_ms`를 최대 2000까지 설정할 수 있습니다. 이벤트는 접근 가능한 채널 전체에서 반환되므로 현재 문제의 `channel_id`에 해당하는 이벤트를 처리합니다. 채널 권한 변경 이벤트의 대상 채널은 `entity_id`에 있습니다. 페이지를 읽은 뒤 서버가 반환한 커서를 저장합니다. 백업 복구 등으로 `CURSOR_RESET`이 반환되면 이벤트 0부터 확인하고 채널 상태를 다시 읽습니다.
+처음에는 `read_events`에 `{"after_event_id":0,"limit":20}`을 전달합니다. 응답의 `next_event_id`와 `event_epoch`를 함께 저장해 다음 호출에 사용합니다. `has_more`가 참이면 이어서 읽고, 선택적으로 `wait_ms`를 최대 2000까지 설정할 수 있습니다. 여러 채널의 이벤트가 함께 반환되므로 현재 문제의 `channel_id`에 해당하는 이벤트를 처리합니다. 페이지를 읽은 뒤 서버가 반환한 커서를 저장합니다. `CURSOR_RESET`이 반환되면 이벤트 0부터 확인하고 채널 상태를 다시 읽습니다.
 
 ```json
 {"after_event_id":63,"event_epoch":"EVENT_EPOCH","wait_ms":1000,"limit":20}

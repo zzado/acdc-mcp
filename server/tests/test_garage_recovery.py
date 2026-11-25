@@ -34,7 +34,7 @@ def test_lost_copy_response_recovers_same_immutable_object(tmp_path, monkeypatch
                    (agent, user, "recovery-test", now()))
         token = security.issue(cx, agent, now() + 120)
     who = security.authenticate(token)
-    channel = collab.create_channel(who, "recovery", "team", "create")["id"]
+    channel = collab.create_channel(who, "recovery", "create")["id"]
     upload = storage.request_upload(who, channel, "recovery.bin", len(data), hashlib.sha256(data).hexdigest(),
                                     "upload", "application/octet-stream", "", [], None)["upload_id"]
     with db.transaction() as cx:

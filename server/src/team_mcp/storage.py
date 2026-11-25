@@ -12,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from .collaboration import contains, view
 from .db import DomainError, audit, canonical, event, idempotent, iso, now
-from .security import Principal, accessible_channel
+from .security import accessible_channel
 from .settings import MIB
 
 LOG = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ class Storage:
         if size > self.cfg.file_limit:
             raise DomainError("QUOTA_EXCEEDED", "File exceeds configured size limit")
         with self.db.transaction(write=True) as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
 
             def reserve():
                 if parent and not cx.execute("SELECT 1 FROM artifacts WHERE id=? AND channel_id=? AND status='ready'",
@@ -122,7 +122,7 @@ class Storage:
     def request_upload_urls(self, who, upload_id, part_numbers):
         with self.db.transaction(write=True) as cx:
             upload = self.upload(cx, upload_id, who)
-            accessible_channel(cx, who, upload["channel_id"])
+            accessible_channel(cx, who.agent_id, upload["channel_id"])
             current = now()
             if upload["expires_at"] <= current:
                 raise DomainError("UPLOAD_EXPIRED", "Upload expired")
@@ -167,7 +167,7 @@ class Storage:
         with self.db.transaction(write=True) as cx:
             grant = cx.execute("""
                 SELECT g.*,u.state,u.expires_at AS upload_expiry,u.admitted_bytes,a.size,a.uploader_id,a.channel_id,
-                       c.expires_at AS token_expiry,c.revoked_at,ag.user_id,us.disabled_at
+                       c.expires_at AS token_expiry,c.revoked_at,us.disabled_at
                 FROM upload_grants g JOIN uploads u ON u.id=g.upload_id JOIN artifacts a ON a.id=u.artifact_id
                 JOIN credentials c ON c.id=g.credential_id JOIN agents ag ON ag.id=a.uploader_id
                 JOIN users us ON us.id=ag.user_id WHERE g.fingerprint=?
@@ -177,8 +177,7 @@ class Storage:
                     or grant["disabled_at"] is not None or min(grant["expires_at"], grant["token_expiry"],
                                                               grant["upload_expiry"]) <= current):
                 raise DomainError("FORBIDDEN", "Upload authorization not available")
-            accessible_channel(cx, Principal(grant["uploader_id"], grant["user_id"], grant["credential_id"],
-                                             "member", True), grant["channel_id"])
+            accessible_channel(cx, grant["uploader_id"], grant["channel_id"])
             if length != grant["expected_bytes"]:
                 raise DomainError("VALIDATION", "Content-Length differs from the upload grant")
             self.rate.take(("put-agent", grant["uploader_id"]), rate=self.cfg.put_rate, burst=max(12, self.cfg.put_rate))
@@ -206,7 +205,7 @@ class Storage:
     def complete_upload(self, who, upload_id):
         with self.db.transaction(write=True) as cx:
             upload = self.upload(cx, upload_id, who)
-            accessible_channel(cx, who, upload["channel_id"])
+            accessible_channel(cx, who.agent_id, upload["channel_id"])
             if upload["state"] == "open":
                 if upload["expires_at"] <= now():
                     raise DomainError("UPLOAD_EXPIRED", "Upload expired")
@@ -227,7 +226,7 @@ class Storage:
         artifact = cx.execute("SELECT * FROM artifacts WHERE id=? AND status='ready'", (artifact_id,)).fetchone()
         if not artifact:
             raise DomainError("NOT_FOUND", "Artifact not found")
-        accessible_channel(cx, who, artifact["channel_id"])
+        accessible_channel(cx, who.agent_id, artifact["channel_id"])
         return artifact
 
     def get_artifact(self, who, artifact_id):
@@ -236,7 +235,7 @@ class Storage:
 
     def list_artifacts(self, who, channel, query, tag, cursor, limit):
         with self.db.transaction() as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
 
             def read(after, count):
                 timestamp, artifact_id = after or [0, ""]
@@ -384,14 +383,13 @@ class Storage:
             if self.upload(cx, row["id"])["state"] != "verifying":
                 return
             owner = cx.execute("""
-                SELECT a.user_id,u.role FROM agents a JOIN users u ON u.id=a.user_id
+                SELECT 1 FROM agents a JOIN users u ON u.id=a.user_id
                 WHERE a.id=? AND u.disabled_at IS NULL
                 """, (row["uploader_id"],)).fetchone()
             try:
                 if not owner:
                     raise DomainError("FORBIDDEN", "Uploader was disabled")
-                accessible_channel(cx, Principal(row["uploader_id"], owner["user_id"], "", owner["role"], True),
-                                   row["channel_id"])
+                accessible_channel(cx, row["uploader_id"], row["channel_id"])
             except DomainError:
                 self.mark_failed(cx, row, "FORBIDDEN")
                 return

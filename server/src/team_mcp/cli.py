@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from uuid import uuid4
 
-from .db import Database, audit, event, now
+from .db import Database, audit, now
 from .security import Security
 from .settings import Settings, secret
 
@@ -27,10 +27,6 @@ def parser():
     rotate.add_argument("--days", type=int, default=30)
     revoke = commands.add_parser("token-revoke")
     revoke.add_argument("credential_id")
-    for action in ("channel-grant", "channel-revoke"):
-        sub = commands.add_parser(action)
-        sub.add_argument("channel_id")
-        sub.add_argument("user_id")
     snapshot = commands.add_parser("db-backup")
     snapshot.add_argument("output", type=Path)
     commands.add_parser("reset-event-epoch")
@@ -115,19 +111,6 @@ def run_command(cx, db, cfg, args):
                 raise ValueError("Unknown credential")
             audit(cx, "credential.revoke", entity=args.credential_id)
             return {"credential_id": args.credential_id, "revoked": True}
-        case "channel-grant" | "channel-revoke":
-            if not cx.execute("SELECT 1 FROM channels WHERE id=? AND kind='private'", (args.channel_id,)).fetchone():
-                raise ValueError("Specify a private channel")
-            if not cx.execute("SELECT 1 FROM users WHERE id=?", (args.user_id,)).fetchone():
-                raise ValueError("Unknown user")
-            grant = args.command == "channel-grant"
-            sql = ("INSERT OR IGNORE INTO channel_members VALUES (?,?)" if grant
-                   else "DELETE FROM channel_members WHERE channel_id=? AND user_id=?")
-            if cx.execute(sql, (args.channel_id, args.user_id)).rowcount:
-                action = "channel.access_granted" if grant else "channel.access_revoked"
-                event(cx, action, args.channel_id, user=args.user_id)
-                audit(cx, action, actor=args.user_id, entity=args.channel_id)
-            return {"channel_id": args.channel_id, "user_id": args.user_id, "granted": grant}
         case "reset-event-epoch":
             epoch = uuid4().hex
             cx.execute("UPDATE settings SET value=? WHERE key='event_epoch'", (epoch,))

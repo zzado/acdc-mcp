@@ -42,31 +42,30 @@ class Collaboration:
             def read(after, count):
                 return cx.execute("""
                     SELECT a.*, u.name AS owner_name FROM agents a JOIN users u ON u.id=a.user_id
-                    WHERE a.name IS NOT NULL AND u.disabled_at IS NULL AND a.id>? AND (? IS NULL OR a.id=?)
+                    WHERE u.disabled_at IS NULL AND a.id>? AND (? IS NULL OR a.id=?)
                     ORDER BY a.id LIMIT ?
                     """, (after or "", agent_id, agent_id, count)).fetchall()
 
             def format_agent(row):
-                return view(row) | {"active": (row["last_seen_at"] or 0) >= now() - 120}
+                return view(row) | {"name": row["name"] or row["owner_name"],
+                                    "active": (row["last_seen_at"] or 0) >= now() - 120}
 
             return self.page(who, "agents", agent_id, cursor, limit, lambda row: row["id"], read, format_agent)
 
-    def create_channel(self, who, name, visibility, key):
+    def create_channel(self, who, name, key):
         with self.db.transaction(write=True) as cx:
             def create():
                 channel = uuid4().hex
                 try:
-                    cx.execute("INSERT INTO channels(id,name,kind,creator_id,created_at) VALUES (?,?,?,?,?)",
-                               (channel, name, visibility, who.agent_id, now()))
+                    cx.execute("INSERT INTO channels(id,name,kind,creator_id,created_at) VALUES (?,?,'team',?,?)",
+                               (channel, name, who.agent_id, now()))
                 except sqlite3.IntegrityError:
                     raise DomainError("CONFLICT", "Channel name is already in use") from None
-                if visibility == "private":
-                    cx.execute("INSERT INTO channel_members VALUES (?,?)", (channel, who.user_id))
                 event(cx, "channel.created", channel, channel)
                 return view(cx.execute("SELECT * FROM channels WHERE id=?", (channel,)).fetchone())
 
-            result = idempotent(cx, who.agent_id, "create_channel", key, [name, visibility], create)
-            accessible_channel(cx, who, result["id"])
+            result = idempotent(cx, who.agent_id, "create_channel", key, [name, "team"], create)
+            accessible_channel(cx, who.agent_id, result["id"])
             return result
 
     def list_channels(self, who, cursor, limit):
@@ -74,7 +73,7 @@ class Collaboration:
             def read(after, count):
                 return cx.execute(f"""
                     SELECT c.* FROM channels c WHERE c.id>:after AND {CHANNEL_VISIBLE} ORDER BY c.id LIMIT :count
-                    """, {"agent": who.agent_id, "user": who.user_id, "after": after or "", "count": count}).fetchall()
+                    """, {"agent": who.agent_id, "after": after or "", "count": count}).fetchall()
             return self.page(who, "channels", None, cursor, limit, lambda row: row["id"], read)
 
     def send_message(self, who, content, key, channel_id, dm_agent_id, reply_to_id, kind, artifacts):
@@ -92,7 +91,7 @@ class Collaboration:
                     raise DomainError("VALIDATION", "Select another Agent for a DM")
                 peer = cx.execute("""
                     SELECT 1 FROM agents a JOIN users u ON u.id=a.user_id
-                    WHERE a.id=? AND a.name IS NOT NULL AND u.disabled_at IS NULL
+                    WHERE a.id=? AND u.disabled_at IS NULL
                     """, (dm_agent_id,)).fetchone()
                 if not peer:
                     raise DomainError("NOT_FOUND", "Agent not found")
@@ -105,7 +104,7 @@ class Collaboration:
                     cx.execute("INSERT INTO channels VALUES (?,?,?,?,?,?,?)",
                                (channel_id, "DM", "dm", who.agent_id, first, second, now()))
                     event(cx, "channel.created", channel_id, channel_id)
-            accessible_channel(cx, who, channel_id)
+            accessible_channel(cx, who.agent_id, channel_id)
 
             def send():
                 for artifact_id in artifacts:
@@ -133,7 +132,7 @@ class Collaboration:
 
     def read_messages(self, who, channel, query, thread, cursor, limit):
         with self.db.transaction() as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
             if thread is not None and not cx.execute(
                     "SELECT 1 FROM messages WHERE id=? AND channel_id=? AND thread_root_id IS NULL",
                     (thread, channel)).fetchone():
@@ -196,13 +195,13 @@ class Collaboration:
 
     def get_state(self, who, channel, key):
         with self.db.transaction() as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
             row = cx.execute("SELECT * FROM channel_state WHERE channel_id=? AND key=?", (channel, key)).fetchone()
             return self.state_item(row) if row else {"key": key, "value": None, "deleted": True, "revision": 0}
 
     def list_state(self, who, channel, prefix, cursor, limit):
         with self.db.transaction() as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
 
             def read(after, count):
                 return cx.execute("""
@@ -219,7 +218,7 @@ class Collaboration:
             raise DomainError("VALIDATION", "State value exceeds 16 KiB")
         tool = "delete_state" if deleted else "set_state"
         with self.db.transaction(write=True) as cx:
-            accessible_channel(cx, who, channel)
+            accessible_channel(cx, who.agent_id, channel)
 
             def mutate():
                 current = cx.execute("SELECT revision,deleted FROM channel_state WHERE channel_id=? AND key=?",

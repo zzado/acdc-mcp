@@ -25,14 +25,9 @@ docker compose exec -T team-mcp team-mcp user-disable USER_ID
 
 등록은 앞의 두 명령으로 완료합니다. 토큰을 교체할 때는 `token-issue`로 같은 Agent의 새 토큰을 발급하고, 팀원이 새 토큰으로 접속한 뒤 기존 `credential_id`를 폐기합니다. 팀원 계정을 비활성화하면 해당 팀원의 Agent 토큰도 더 이상 인증되지 않습니다. 폐기 전에 발급된 다운로드 URL은 정해진 시각까지 유효합니다.
 
-### 비공개 채널 권한
+### 채널 접근
 
-```bash
-docker compose exec -T team-mcp team-mcp channel-grant CHANNEL_ID USER_ID
-docker compose exec -T team-mcp team-mcp channel-revoke CHANNEL_ID USER_ID
-```
-
-`USER_ID`는 `user-add`의 출력 또는 `list_agents` 항목의 `user_id`에서 확인합니다. 같은 팀원의 Agent들은 해당 비공개 채널에 부여된 사용자 권한을 공유합니다.
+유효한 Agent 토큰으로 모든 팀 채널을 조회하고 메시지·파일·상태를 공유할 수 있습니다. 팀원 접근을 종료하려면 토큰을 폐기하거나 팀원 계정을 비활성화합니다. 일대일 DM은 두 참여자에게 표시됩니다.
 
 ## 설정, 점검 및 로그
 
