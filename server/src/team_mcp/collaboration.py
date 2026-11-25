@@ -76,7 +76,9 @@ class Collaboration:
         if sum(value is not None for value in (channel_id, dm_agent_id, reply_to_id)) != 1:
             raise DomainError("VALIDATION", "Select exactly one message destination")
         with self.db.transaction(write=True) as cx:
+            require_active_credential(cx, who)
             reply = None
+            new_dm = None
             if reply_to_id is not None:
                 reply = cx.execute("SELECT * FROM messages WHERE id=?", (reply_to_id,)).fetchone()
                 if reply is None:
@@ -85,24 +87,27 @@ class Collaboration:
             elif dm_agent_id is not None:
                 if dm_agent_id == who.agent_id:
                     raise DomainError("VALIDATION", "Select another Agent for a DM")
-                peer = cx.execute("""
-                    SELECT 1 FROM agents a JOIN users u ON u.id=a.user_id
-                    WHERE a.id=? AND u.disabled_at IS NULL
-                    """, (dm_agent_id,)).fetchone()
-                if not peer:
-                    raise DomainError("NOT_FOUND", "Agent not found")
                 first, second = sorted((who.agent_id, dm_agent_id))
                 row = cx.execute("SELECT id FROM channels WHERE dm_first=? AND dm_second=?", (first, second)).fetchone()
                 if row:
                     channel_id = row["id"]
                 else:
                     channel_id = uuid4().hex
-                    cx.execute("INSERT INTO channels VALUES (?,?,?,?,?,?,?)",
-                               (channel_id, "DM", "dm", who.agent_id, first, second, now()))
-                    event(cx, "channel.created", channel_id, channel_id)
-            accessible_channel(cx, who.agent_id, channel_id)
+                    new_dm = (first, second)
+            if new_dm is None:
+                accessible_channel(cx, who.agent_id, channel_id)
 
             def send():
+                if dm_agent_id is not None:
+                    if not cx.execute("""
+                        SELECT 1 FROM agents a JOIN users u ON u.id=a.user_id
+                        WHERE a.id=? AND u.disabled_at IS NULL
+                        """, (dm_agent_id,)).fetchone():
+                        raise DomainError("NOT_FOUND", "Agent not found")
+                    if new_dm:
+                        cx.execute("INSERT INTO channels VALUES (?,?,?,?,?,?,?)",
+                                   (channel_id, "DM", "dm", who.agent_id, *new_dm, now()))
+                        event(cx, "channel.created", channel_id, channel_id)
                 for artifact_id in artifacts:
                     if not cx.execute("SELECT 1 FROM artifacts WHERE id=? AND channel_id=? AND status='ready'",
                                       (artifact_id, channel_id)).fetchone():

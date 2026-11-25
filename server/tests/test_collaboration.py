@@ -4,16 +4,20 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from botocore.exceptions import ClientError
 from fastmcp import Client, FastMCP
+from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter
 
 from team_mcp import db as db_module, tools
 from team_mcp.collaboration import Collaboration
 from team_mcp.db import Database, DomainError, event, now
 from team_mcp.security import RateLimits, Security
+from team_mcp.settings import MIB, Settings
 from team_mcp.storage import Storage
 from team_mcp.tools import Cursor, StateKey
 
@@ -67,6 +71,33 @@ def test_message_search_unicode_and_literal_characters(team):
         rows = collab.read_messages(reader, channel, query, None, None, 20)["items"]
         assert [row["content"] for row in rows] == ["Ünïcödé: Straße_%!"]
     assert collab.read_messages(reader, channel, "unicode", None, None, 20)["items"] == []
+
+
+def test_dm_receipt_after_recipient_disabled(team):
+    collab, security, (sender, recipient, outsider), tokens = team
+
+    def send(who=sender, key="send-once", text="receipt"):
+        return collab.send_message(who, text, key, None, recipient.agent_id, None, "chat", [])
+
+    receipt = send()
+    with security.db.transaction(write=True) as cx:
+        cx.execute("UPDATE users SET disabled_at=? WHERE id=?", (now(), recipient.user_id))
+    assert send() == receipt
+    for attempt, code in ((lambda: send(key="new"), "NOT_FOUND"),
+                          (lambda: send(text="changed"), "CONFLICT"),
+                          (lambda: send(outsider), "NOT_FOUND")):
+        with pytest.raises(DomainError) as failure:
+            attempt()
+        assert failure.value.body["code"] == code
+    with security.db.transaction(write=True) as cx:
+        assert cx.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
+        assert cx.execute("SELECT count(*) FROM events WHERE kind='message.created'").fetchone()[0] == 1
+        assert cx.execute("SELECT count(*) FROM channels WHERE kind='dm'").fetchone()[0] == 1
+        cx.execute("UPDATE credentials SET revoked_at=? WHERE id=?", (now(), sender.credential_id))
+    assert security.authenticate(tokens[0]) is None
+    with pytest.raises(DomainError) as revoked:
+        send()
+    assert revoked.value.body["code"] == "FORBIDDEN"
 
 
 def test_team_channels_dm_and_incremental_events(team):
@@ -123,11 +154,20 @@ def test_state_cursor_round_trips_maximum_unicode_keys(team, letter):
         collab.list_state(reader, channel, "", cursor, 1)
 
 
-def test_non_ascii_cursor_is_validation_error(team, monkeypatch):
+@pytest.fixture
+def tool_server(team, tmp_path, monkeypatch):
     collab, security, _, tokens = team
-    mcp = FastMCP("cursor test")
-    tools.install_tools(mcp, collab, None, security, RateLimits())
+    rate = RateLimits()
+    storage = Storage(Settings(database=security.db.path, disk_path=tmp_path, disk_floor=0),
+                      security.db, collab, rate, None, None, Mock())
+    mcp = FastMCP("tool tests")
+    tools.install_tools(mcp, collab, storage, security, rate)
     monkeypatch.setattr(tools, "get_access_token", lambda: SimpleNamespace(token=tokens[0]))
+    return mcp, storage
+
+
+def test_non_ascii_cursor_is_validation_error(tool_server):
+    mcp, _ = tool_server
 
     async def read_page():
         async with Client(mcp) as client:
@@ -137,6 +177,67 @@ def test_non_ascii_cursor_is_validation_error(team, monkeypatch):
     assert result.is_error
     assert result.structured_content["error"]["code"] == "VALIDATION"
     assert result.structured_content["error"]["retryable"] is False
+
+
+@pytest.mark.parametrize("limit", [True, "1", 1, 1.0, 1.5, 0, 51])
+def test_limit_matches_published_schema(tool_server, limit):
+    mcp, _ = tool_server
+
+    async def check():
+        async with Client(mcp) as client:
+            tool = next(tool for tool in await client.list_tools() if tool.name == "list_channels")
+            arguments = {"limit": limit}
+            valid = Draft202012Validator(tool.input_schema).is_valid(arguments)
+            result = await client.call_tool(tool.name, arguments, raise_on_error=False)
+            Draft202012Validator(tool.output_schema).validate(result.structured_content)
+            assert result.is_error == (not valid)
+            if not valid:
+                error = result.structured_content["error"]
+                assert error["code"] == "VALIDATION" and error["retryable"] is False
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("transition,code,expected", [
+    ("complete_upload", "NoSuchUpload", "sealing"),
+    ("abort_upload", "NoSuchUpload", "aborting"),
+    (None, "NoSuchUpload", "STORAGE_UNAVAILABLE"),
+    ("complete_upload", "ServiceUnavailable", "STORAGE_UNAVAILABLE"),
+])
+def test_multipart_status_during_transition(team, tool_server, transition, code, expected):
+    collab, _, (owner, other, _), _ = team
+    mcp, storage = tool_server
+    channel = collab.create_channel(owner, "upload", "channel")["id"]
+    upload = storage.request_upload(owner, channel, "parts.bin", 64 * MIB + 1, "0" * 64, "reserve",
+                                    "application/octet-stream", "", [], None)["upload_id"]
+    with storage.db.transaction(write=True) as cx:
+        cx.execute("UPDATE uploads SET state='open',garage_id='test-upload' WHERE id=?", (upload,))
+
+    def list_parts(**kwargs):
+        if transition:
+            getattr(storage, transition)(owner, upload)
+        raise ClientError({"Error": {"Code": code}}, "ListParts")
+
+    storage.s3.list_parts.side_effect = list_parts
+    with pytest.raises(DomainError) as forbidden:
+        storage.get_upload_status(other, upload, 0, 20)
+    assert forbidden.value.body["code"] == "NOT_FOUND"
+    storage.s3.list_parts.assert_not_called()
+
+    async def check():
+        async with Client(mcp) as client:
+            tool = next(tool for tool in await client.list_tools() if tool.name == "get_upload_status")
+            result = await client.call_tool(tool.name, {"upload_id": upload}, raise_on_error=False)
+            data = result.structured_content
+            Draft202012Validator(tool.output_schema).validate(data)
+            if expected == "STORAGE_UNAVAILABLE":
+                assert result.is_error and data["error"]["code"] == expected and data["error"]["retryable"]
+            else:
+                assert not result.is_error and data["state"] == expected
+                assert data["parts"] == [] and data["next_part_cursor"] is None
+
+    asyncio.run(check())
+    storage.s3.list_parts.assert_called_once()
 
 
 def test_pre_upgrade_cursor_keeps_query_binding(team):

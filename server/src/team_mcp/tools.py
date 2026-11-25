@@ -2,13 +2,14 @@ import asyncio
 import inspect
 import logging
 import sqlite3
-from functools import wraps
+from functools import cached_property, wraps
 from typing import Annotated, Literal
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastmcp.exceptions import ValidationError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.tools import FunctionTool, ToolResult
+from jsonschema import Draft202012Validator
 from pydantic import Field, JsonValue, StringConstraints
 
 from .db import DomainError
@@ -75,11 +76,17 @@ def output_schema(properties):
 
 
 class TeamTool(FunctionTool):
+    @cached_property
+    def input_validator(self):
+        return Draft202012Validator(self.parameters)
+
     async def run(self, arguments):
         try:
+            # Check the published JSON types before Pydantic normalizes Python arguments.
+            if not self.input_validator.is_valid(arguments):
+                raise ValidationError("Arguments do not match the input schema")
             return await super().run(arguments)
         except ValidationError:
-            # FastMCP validates arguments before entering the tool function.
             error = DomainError("VALIDATION", f"Arguments do not match the input schema for {self.name}")
             return ToolResult(structured_content={"error": error.body}, is_error=True)
 

@@ -192,15 +192,26 @@ class Storage:
     def get_upload_status(self, who, upload_id, marker, limit):
         with self.db.transaction() as cx:
             upload = self.upload(cx, upload_id, who)
-            result = self.status(upload) | {"parts": [], "next_part_cursor": None}
+        parts = []
+        next_marker = None
         if upload["state"] == "open" and upload["garage_id"]:
-            data = self.s3.list_parts(Bucket=self.cfg.staging_bucket, Key=upload["staging_key"],
-                                      UploadId=upload["garage_id"], PartNumberMarker=marker, MaxParts=limit)
-            result["parts"] = [{"number": p["PartNumber"], "size": p["Size"], "etag": p["ETag"]}
-                               for p in data.get("Parts", [])]
-            if data.get("IsTruncated"):
-                result["next_part_cursor"] = int(data["NextPartNumberMarker"])
-        return result
+            try:
+                data = self.s3.list_parts(Bucket=self.cfg.staging_bucket, Key=upload["staging_key"],
+                                          UploadId=upload["garage_id"], PartNumberMarker=marker, MaxParts=limit)
+            except ClientError as error:
+                if not s3_error(error, "NoSuchUpload"):
+                    raise
+                # A concurrent seal or abort can retire this S3 upload after the first read.
+                with self.db.transaction() as cx:
+                    upload = self.upload(cx, upload_id, who)
+                if upload["state"] == "open":
+                    raise
+            else:
+                parts = [{"number": p["PartNumber"], "size": p["Size"], "etag": p["ETag"]}
+                         for p in data.get("Parts", [])]
+                if data.get("IsTruncated"):
+                    next_marker = int(data["NextPartNumberMarker"])
+        return self.status(upload) | {"parts": parts, "next_part_cursor": next_marker}
 
     def complete_upload(self, who, upload_id):
         with self.db.transaction(write=True) as cx:

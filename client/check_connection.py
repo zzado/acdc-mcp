@@ -62,12 +62,28 @@ def check_connection(url, token, tls):
         raise ValueError("The server did not negotiate a supported Streamable HTTP protocol version")
     headers["MCP-Protocol-Version"] = protocol
     request("notifications/initialized", {})
-    catalog = request("tools/list", {}, 2)
-    tools = catalog.get("tools") if isinstance(catalog, dict) else None
-    if not isinstance(tools, list) or not any(isinstance(tool, dict) and tool.get("name") == "register_agent"
-                                              for tool in tools):
+    seen_cursors = set()
+    params = {}
+    count = 0
+    has_register_agent = False
+    while True:
+        catalog = request("tools/list", params, 2 + len(seen_cursors))
+        tools = catalog.get("tools") if isinstance(catalog, dict) else None
+        if not isinstance(tools, list):
+            raise ValueError("The server returned an invalid MCP tool list")
+        count += len(tools)
+        if any(isinstance(tool, dict) and tool.get("name") == "register_agent" for tool in tools):
+            has_register_agent = True
+        cursor = catalog.get("nextCursor")
+        if cursor is None:
+            break
+        if not isinstance(cursor, str) or cursor in seen_cursors:
+            raise ValueError("The MCP tool list returned an invalid or repeated cursor")
+        seen_cursors.add(cursor)
+        params = {"cursor": cursor}
+    if not has_register_agent:
         raise ValueError("The MCP tool list does not contain the ACDC MCP register_agent tool")
-    return protocol, len(tools)
+    return protocol, count
 
 
 def main():
@@ -102,7 +118,7 @@ def main():
         parser.exit(1, "Expected a JSON MCP response. Check the server URL.\n")
     except ValueError as error:
         parser.exit(1, f"{error}\n")
-    print(f"Connected to ACDC MCP using {protocol}. Tools on the first page: {count}.")
+    print(f"Connected to ACDC MCP using {protocol}. Total tools: {count}.")
 
 
 if __name__ == "__main__":

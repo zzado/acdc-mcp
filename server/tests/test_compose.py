@@ -182,7 +182,10 @@ def test_tool_input_validation(team, modern):
     for invalid in ({"content": ""}, {"type": "unknown"}, {"content": "a" * 8193}, {"content": "한" * 2731}):
         error = client.tool("send_message", error="VALIDATION", **(message | invalid))["error"]
         assert error["retryable"] is False and error["message"]
-    client.tool("list_channels", limit=0, error="VALIDATION")
+    for limit in (0, True, "1"):
+        error = client.tool("list_channels", limit=limit, error="VALIDATION")["error"]
+        assert error["retryable"] is False and error["message"]
+    client.tool("list_channels", limit=1)
     client.tool("request_upload", error="VALIDATION")
     assert client.tool("read_messages", channel_id=shared)["items"] == []
     assert client.tool("send_message", **message)["content"] == "hello"
