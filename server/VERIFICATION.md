@@ -16,8 +16,11 @@ $env:TEAM_UV_FLAGS = '--dev'
 docker compose -p team-mcp-test -f compose.yaml -f server/tests/compose.test.yaml up -d --build --wait
 docker compose -p team-mcp-test -f compose.yaml -f server/tests/compose.test.yaml cp reverse-proxy:/data/caddy/pki/authorities/local/root.crt test-data/root.crt
 $env:TEAM_TEST_COMPOSE = '1'
-uv run --no-project --with pytest==9.2.0 python -m pytest server/tests/test_compose.py -m 'not large'
+uv run --no-project --with pytest==9.2.0 --with jsonschema==4.26.0 python -m pytest server/tests/test_compose.py -m 'not large'
 ```
+
+The Compose tests validate tool responses against the output schemas served by
+`tools/list`, including upload status and tool errors.
 
 Run unit tests in the dev-enabled Team MCP image so they use the pinned
 Python and SQLite. Mount the repository read-only at `/src` and run

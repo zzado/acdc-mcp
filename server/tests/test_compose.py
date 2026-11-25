@@ -7,12 +7,14 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import cached_property
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import pytest
+from jsonschema import Draft202012Validator
 
 pytestmark = pytest.mark.integration
 MIB = 1024**2
@@ -66,9 +68,21 @@ class Client:
             assert "error" not in body, body.get("error")
             return body["result"]
 
+    @cached_property
+    def output_validators(self):
+        validators = {}
+        for tool in self.rpc("tools/list", {})["tools"]:
+            schema = tool["outputSchema"]
+            Draft202012Validator.check_schema(schema)
+            validators[tool["name"]] = Draft202012Validator(schema)
+        return validators
+
     def tool(self, name, /, *, error=None, **arguments):
+        validator = self.output_validators[name]
         result = self.rpc("tools/call", {"name": name, "arguments": arguments})
         structured = result["structuredContent"]
+        if not validator.is_valid(structured):
+            pytest.fail(f"{name} structuredContent does not match its advertised outputSchema", pytrace=False)
         if error:
             assert result.get("isError") and structured["error"]["code"] == error
         else:
@@ -76,7 +90,7 @@ class Client:
         return structured
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def team():
     if os.getenv("TEAM_TEST_COMPOSE") != "1":
         pytest.skip("Set TEAM_TEST_COMPOSE=1 after starting the test stack")
@@ -163,14 +177,27 @@ def test_upload_download_and_immutability(team):
     writer, reader, teammate, _, tls = team
     shared = channel(writer)
     payload = b"team verification\n" * 1024
-    pending = reserve(writer, shared, "candidate.bin", payload)
+    reservation = {"channel_id": shared, "filename": "candidate.bin", "size": len(payload),
+                   "sha256": hashlib.sha256(payload).hexdigest(), "idempotency_key": uuid4().hex}
+    pending = writer.tool("request_upload", **reservation)
     artifact, upload = pending["artifact_id"], pending["upload_id"]
+    assert pending["error"] is None and pending["verified_sha256"] is None
+    assert writer.tool("request_upload", **reservation) == pending
+    writer.tool("request_upload", error="CONFLICT", **(reservation | {"filename": "different.bin"}))
+    status = writer.tool("get_upload_status", upload_id=upload)
+    assert status == pending | {"parts": [], "next_part_cursor": None}
+    reader.tool("get_upload_status", upload_id=upload, error="NOT_FOUND")
+    reader.tool("complete_upload", upload_id=upload, error="NOT_FOUND")
     grant = writer.tool("request_upload_urls", upload_id=upload)["transfers"][0]
     assert put(tls, grant, payload) == 200
-    writer.tool("complete_upload", upload_id=upload)
-    writer.tool("complete_upload", upload_id=upload)
+    for _ in range(2):
+        sealed = writer.tool("complete_upload", upload_id=upload)
+        assert sealed["artifact_id"] == artifact and sealed["error"] is None
     ready = wait_for(writer, upload, "ready")
-    assert ready["verified_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert ready["verified_sha256"] == reservation["sha256"]
+    replay = writer.tool("request_upload", **reservation)
+    assert replay | {"parts": [], "next_part_cursor": None} == ready
+    assert writer.tool("complete_upload", upload_id=upload) == replay
     assert put(tls, grant, b"\x00" * len(payload)) == 403
     assert teammate.tool("get_artifact", artifact_id=artifact)["verified_sha256"] == ready["verified_sha256"]
     assert [item["id"] for item in teammate.tool("list_artifacts", channel_id=shared)["items"]] == [artifact]

@@ -39,6 +39,7 @@ FIELDS = {
     "mode": {"enum": ["single", "multipart"]}, "expires_at": {"type": "string"},
     "part_size": {"type": ["integer", "null"]}, "part_count": {"type": ["integer", "null"]},
     "parts": {"type": "array", "items": {"type": "object"}},
+    "next_part_cursor": {"type": ["integer", "null"]},
     "transfers": {"type": "array", "items": {"type": "object", "required": ["method", "url", "required_headers",
                   "offset", "length", "expires_at"]}},
     "method": {"const": "GET"}, "url": {"type": "string"}, "size": {"type": "integer"},
@@ -46,19 +47,34 @@ FIELDS = {
     "key": {"type": "string"}, "value": {}, "revision": {"type": "integer"}, "deleted": {"type": "boolean"},
 }
 PAGE = ("items", "next_cursor")
-UPLOAD = ("upload_id", "artifact_id", "state", "mode", "size", "part_size", "part_count", "expires_at")
+UPLOAD_STATUS = {
+    name: FIELDS[name]
+    for name in ("upload_id", "artifact_id", "state", "mode", "size", "part_size", "part_count", "expires_at")
+} | {
+    "error": {"type": ["string", "null"]},
+    "verified_sha256": {"type": ["string", "null"]},
+}
+TOOL_ERROR = {
+    "type": "object",
+    "required": ["code", "message", "retryable"],
+    "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"},
+        "retry_after_ms": {"type": "integer"},
+    },
+}
 
 
-def output_schema(fields):
-    return {"type": "object", "properties": {name: FIELDS[name] for name in fields} | {
-        "error": {"type": "object", "required": ["code", "message", "retryable"], "properties": {
-            "code": {"type": "string"}, "message": {"type": "string"}, "retryable": {"type": "boolean"},
-            "retry_after_ms": {"type": "integer"}}}},
-        "oneOf": [{"required": list(fields)}, {"required": ["error"]}]}
+def output_schema(properties):
+    # Upload status carries its own nullable error code. Tool errors use an object.
+    success = {"properties": {"error": False} | properties, "required": list(properties)}
+    failure = {"properties": {"error": TOOL_ERROR}, "required": ["error"], "additionalProperties": False}
+    return {"type": "object", "oneOf": [success, failure]}
 
 
 def install_tools(mcp, collaboration, storage, security, rate):
-    def tool(*fields):
+    def tool(*fields, **extra_properties):
         def decorate(function):
             @wraps(function)
             async def call(*args, **kwargs):
@@ -98,7 +114,8 @@ def install_tools(mcp, collaboration, storage, security, rate):
             signature = inspect.signature(function)
             call.__signature__ = signature.replace(parameters=list(signature.parameters.values())[1:],
                                                    return_annotation=ToolResult)
-            return mcp.tool(call, output_schema=output_schema(fields))
+            properties = {name: FIELDS[name] for name in fields} | extra_properties
+            return mcp.tool(call, output_schema=output_schema(properties))
         return decorate
 
     @tool("id", "name")
@@ -147,7 +164,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
         """Read changes after a saved event ID and epoch, optionally waiting up to two seconds."""
         return await collaboration.wait_events(who, after_event_id, event_epoch, wait_ms, limit)
 
-    @tool(*UPLOAD)
+    @tool(**UPLOAD_STATUS)
     def request_upload(who, channel_id: Identifier, filename: Filename, size: Nonnegative, sha256: Sha256,
                        idempotency_key: IdemKey, content_type: Name = "application/octet-stream",
                        description: Text = "", tags: Annotated[list[Tag], Field(max_length=16)] | None = None,
@@ -163,18 +180,18 @@ def install_tools(mcp, collaboration, storage, security, rate):
         """Get short-lived HTTPS PUT URLs and required headers for a file or up to eight Parts."""
         return storage.request_upload_urls(who, upload_id, part_numbers)
 
-    @tool(*UPLOAD, "parts")
+    @tool("parts", "next_part_cursor", **UPLOAD_STATUS)
     def get_upload_status(who, upload_id: Identifier, part_cursor: Annotated[int, Field(ge=0, le=10_000)] = 0,
                           limit: Limit = 20):
         """Get upload status and list committed Parts for retry or resume."""
         return storage.get_upload_status(who, upload_id, part_cursor, limit)
 
-    @tool(*UPLOAD)
+    @tool(**UPLOAD_STATUS)
     def complete_upload(who, upload_id: Identifier):
         """Request asynchronous file sealing and SHA-256 verification. Poll upload status for the result."""
         return storage.complete_upload(who, upload_id)
 
-    @tool(*UPLOAD)
+    @tool(**UPLOAD_STATUS)
     def abort_upload(who, upload_id: Identifier):
         """Cancel a pending upload and schedule staging cleanup."""
         return storage.abort_upload(who, upload_id)
