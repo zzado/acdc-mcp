@@ -12,6 +12,7 @@ from fastmcp.tools import FunctionTool, ToolResult
 from jsonschema import Draft202012Validator
 from pydantic import Field, JsonValue, StringConstraints
 
+from .collaboration import INVALID_DISPLAY_TEXT
 from .db import DomainError
 
 LOG = logging.getLogger(__name__)
@@ -26,6 +27,10 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 DisplayName = Annotated[str, Field(min_length=1, max_length=80,
                                    description="New names must be nonblank, single-line and free of control "
                                                "and bidi formatting characters.")]
+PROFILE_TEXT_SCHEMA = {"not": {"pattern": INVALID_DISPLAY_TEXT.pattern}}
+ProfileLabel = Annotated[DisplayName, Field(json_schema_extra=PROFILE_TEXT_SCHEMA)]
+ProfileDescription = Annotated[Text, Field(description="Single-line profile description. Use an empty string to clear.",
+                                           json_schema_extra=PROFILE_TEXT_SCHEMA)]
 Filename = Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\x00-\x1f\\]+$")]
 IdemKey = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 # Share ASCII rules across regex engines. Pydantic checks Unicode word characters on the server.
@@ -143,7 +148,7 @@ def install_tools(mcp, collaboration, storage, security, rate):
         return decorate
 
     @tool("id", "name")
-    def register_agent(who, name: DisplayName, description: Text = "", runtime: Name | None = None):
+    def register_agent(who, name: ProfileLabel, description: ProfileDescription = "", runtime: ProfileLabel | None = None):
         """Set your Agent profile on the identity assigned to this token."""
         return collaboration.register_agent(who, name, description, runtime)
 
@@ -170,7 +175,10 @@ def install_tools(mcp, collaboration, storage, security, rate):
                      reply_to_id: MessageID | None = None,
                      type: Literal["chat", "finding", "candidate", "review_request", "review_result"] = "chat",
                      artifact_ids: Annotated[list[Identifier], Field(max_length=8)] | None = None):
-        """Send a message to exactly one channel, Agent DM, or reply target. Attach ready Artifacts by ID."""
+        """Send to exactly one destination. For a reply, use reply_to_id alone and omit channel_id and dm_agent_id.
+
+        Use channel_id for a new channel message or dm_agent_id for a new DM. Attach ready Artifacts by ID.
+        """
         if len(content.encode()) > 8192:
             raise DomainError("VALIDATION", "Message exceeds 8 KiB")
         return collaboration.send_message(who, content, idempotency_key, channel_id, dm_agent_id, reply_to_id,

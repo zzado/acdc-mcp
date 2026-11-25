@@ -287,6 +287,63 @@ def test_legacy_display_names_and_committed_receipt(team):
     assert invalid.value.body["code"] == "VALIDATION"
 
 
+@pytest.mark.parametrize("field", ["runtime", "description"])
+def test_profile_metadata_rejects_controls_and_preserves_legacy(team, tool_server, field):
+    collab, security, (owner, reader, _), _ = team
+    mcp, _ = tool_server
+    with security.db.transaction(write=True) as cx:
+        cx.execute("UPDATE agents SET runtime=?, description=? WHERE id=?",
+                   ("old\0runtime", "old\u202edesc", owner.agent_id))
+    original = collab.list_agents(reader, owner.agent_id, None, 1)["items"][0]
+    assert (original["runtime"], original["description"]) == ("old\0runtime", "old\u202edesc")
+
+    async def check():
+        async with Client(mcp) as client:
+            tool = next(t for t in await client.list_tools() if t.name == "register_agent")
+            inputs = Draft202012Validator(tool.input_schema)
+            outputs = Draft202012Validator(tool.output_schema)
+            for value in ("A\0B", "A\n", "A\rB", "A\u0085B", "A\u2028B", "A\u202eB", "A\u2067B", " \u3000"):
+                args = {"name": "new", field: value}
+                result = await client.call_tool(tool.name, args, raise_on_error=False)
+                outputs.validate(result.structured_content)
+                assert result.is_error and result.structured_content["error"]["code"] == "VALIDATION"
+                assert result.structured_content["error"]["retryable"] is False
+                assert not inputs.is_valid(args)
+
+    asyncio.run(check())
+    saved = collab.list_agents(reader, owner.agent_id, None, 1)["items"][0]
+    assert (saved["name"], saved["runtime"], saved["description"]) == (
+        original["name"], original["runtime"], original["description"])
+
+
+def test_profile_metadata_valid_values_and_defaults(team, tool_server):
+    collab, _, (owner, reader, _), _ = team
+    mcp, _ = tool_server
+
+    async def check():
+        async with Client(mcp) as client:
+            tool = next(t for t in await client.list_tools() if t.name == "register_agent")
+            inputs = Draft202012Validator(tool.input_schema)
+            assert set(tool.input_schema["required"]) == {"name"}
+            for args in ({"name": "실행자", "runtime": "  Codex CLI  ", "description": " العربية · 한글 "},
+                         {"name": "실행자", "runtime": "R" * 80, "description": "한" * 512},
+                         {"name": "실행자", "runtime": None, "description": ""}, {"name": "실행자"}):
+                assert inputs.is_valid(args)
+                result = (await client.call_tool(tool.name, args)).structured_content
+                listed = collab.list_agents(reader, owner.agent_id, None, 1)["items"][0]
+                runtime = args.get("runtime")
+                expected_runtime = runtime.strip() if runtime is not None else None
+                assert listed["runtime"] == result["runtime"] == expected_runtime
+                assert listed["description"] == result["description"] == args.get("description", "")
+            for error in ({"runtime": ""}, {"runtime": "R" * 81}, {"description": "한" * 513}):
+                args = {"name": "실행자"} | error
+                assert not inputs.is_valid(args)
+                result = await client.call_tool(tool.name, args, raise_on_error=False)
+                assert result.is_error and result.structured_content["error"]["code"] == "VALIDATION"
+
+    asyncio.run(check())
+
+
 def test_unicode_state_key_schema_and_storage(tool_server, team):
     mcp, _ = tool_server
     collab, _, (owner, _, _), _ = team

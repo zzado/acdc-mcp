@@ -9,12 +9,16 @@ from .db import DomainError, canonical, event, idempotent, iso, now
 from .security import CHANNEL_VISIBLE, accessible_channel, require_active_credential
 
 
-DISPLAY_CONTROLS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]")
+# Spell out Unicode space separators so Python and JSON Schema clients agree on blank text.
+INVALID_DISPLAY_TEXT = re.compile(
+    r"[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]"
+    r"|^[ \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]+$"
+)
 
 
-def validate_display_name(name):
-    if not name.strip() or DISPLAY_CONTROLS.search(name):
-        raise DomainError("VALIDATION", "Use a nonblank, single-line name without control or bidi formatting characters")
+def validate_display_text(value):
+    if not value or INVALID_DISPLAY_TEXT.search(value):
+        raise DomainError("VALIDATION", "Use nonblank, single-line text without control or bidi formatting characters")
 
 
 def view(row):
@@ -38,7 +42,12 @@ class Collaboration:
         return {"items": [format_item(row) for row in rows[:limit]], "next_cursor": next_cursor}
 
     def register_agent(self, who, name, description, runtime):
-        validate_display_name(name)
+        validate_display_text(name)
+        if runtime is not None:
+            validate_display_text(runtime)
+            runtime = runtime.strip()
+        if description:
+            validate_display_text(description)
         with self.db.transaction(write=True) as cx:
             cx.execute("UPDATE agents SET name=?,description=?,runtime=?,last_seen_at=? WHERE id=?",
                        (name.strip(), description, runtime, now(), who.agent_id))
@@ -64,7 +73,7 @@ class Collaboration:
         with self.db.transaction(write=True) as cx:
             def create():
                 # Previously committed requests can still replay their original receipt.
-                validate_display_name(name)
+                validate_display_text(name)
                 channel = uuid4().hex
                 try:
                     cx.execute("INSERT INTO channels(id,name,kind,creator_id,created_at) VALUES (?,?,'team',?,?)",
