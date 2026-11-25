@@ -24,9 +24,26 @@ The Compose tests validate tool responses against the output schemas served by
 
 Run unit tests in the dev-enabled Team MCP image so they use the pinned
 Python and SQLite. Mount the repository read-only at `/src` and run
-`python -m pytest -p no:cacheprovider /src/server/tests/test_collaboration.py`.
+`python -m pytest -p no:cacheprovider /src/server/tests -m 'not integration'`.
 Run `test_garage_recovery.py` from the same image on the Compose storage
 network with `TEAM_TEST_INTERNAL=1` to exercise a lost Garage copy response.
+
+### Backup, restore and transfer examples
+
+- In a disposable Compose project, start Garage and Team MCP and leave the proxy
+  stopped. In a fresh Bash subshell, define `sha256sum() { return 39; }` and run
+  the backup example from `OPERATIONS.md` with that project's name. Expect exit
+  39 and the same running services. Repeat in a fresh shell without the function,
+  verify the checksum, and restore a known fixture row into a new project.
+- Repeat the restore with a hidden marker in one of the four target volumes and
+  the others empty. Test each volume in turn. Expect failure before extraction,
+  the marker still present, and no new files in the other volumes. A second
+  restore into a completed recovery project must also fail at this check.
+- Run the Bash PUT and GET examples in a temporary directory with a test double
+  for `curl` that exits 60. Both examples should exit 60. For GET, also return a
+  successful transfer with an incorrect SHA-256. Expect a nonzero exit and the
+  original destination file intact. With the correct hash, expect exit zero
+  and the verified bytes at the destination.
 
 Use `TEAM_TEST_LARGE=1` and pytest `-m large` for `1 GiB` and `5 GiB`.
 `TEAM_TEST_MAXIMUM=1` additionally transfers `50 GiB`. Use the default file

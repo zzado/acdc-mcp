@@ -2,6 +2,7 @@ import argparse
 import json
 import shutil
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,22 +56,37 @@ def main():
         return
 
     db = Database(cfg.database)
-    db.migrate()
-    if args.command == "db-backup":
-        if args.output.exists():
-            top.error("Specify a new backup file")
-        with sqlite3.connect(db.path) as source, sqlite3.connect(args.output) as destination:
-            source.backup(destination)
-            if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                top.error("Backup failed integrity check")
-        return
-
     try:
-        with db.transaction(write=args.command != "status") as cx:
-            output = run_command(cx, db, cfg, args)
-    except (ValueError, sqlite3.IntegrityError) as error:
+        if args.command in ("db-backup", "status"):
+            with closing(sqlite3.connect(db.path.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+                if args.command == "db-backup":
+                    backup_database(source, args.output)
+                    return
+                source.row_factory = sqlite3.Row
+                source.execute("BEGIN")
+                output = run_command(source, db, cfg, args)
+        else:
+            db.migrate()
+            with db.transaction(write=True) as cx:
+                output = run_command(cx, db, cfg, args)
+    except (ValueError, sqlite3.Error, OSError) as error:
         top.error(str(error))
     print(json.dumps(output, ensure_ascii=False))
+
+
+def backup_database(source, path):
+    try:
+        path.touch(mode=0o600, exist_ok=False)
+    except FileExistsError:
+        raise ValueError("Specify a new backup file") from None
+    try:
+        with closing(sqlite3.connect(path)) as destination:
+            source.backup(destination)
+            if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("Backup failed integrity check")
+    except BaseException:
+        path.unlink()
+        raise
 
 
 def run_command(cx, db, cfg, args):

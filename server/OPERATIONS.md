@@ -75,9 +75,10 @@ docker compose logs --tail 100 team-mcp garage garage-init reverse-proxy
 
 ## 백업
 
-경기 외 시간에 새 작업을 중지하고 진행 중인 업로드와 검증이 끝나기를 기다립니다. 서비스 중지 상태에서 SQLite 백업과 Garage 데이터를 한 시점으로 묶습니다. 아래 예제는 `.env`에 `COMPOSE_PROJECT_NAME=acdc-mcp`를 설정한 배포를 기준으로 합니다. 다른 프로젝트 이름을 사용했다면 `project`에 해당 이름을 넣습니다.
+경기 외 시간에 새 작업을 중지하고 진행 중인 업로드와 검증이 끝나기를 기다립니다. 서비스 중지 상태에서 SQLite 백업과 Garage 데이터를 한 시점으로 묶습니다. `db-backup`과 `status`는 기존 DB를 읽기 전용으로 열어 현재 스키마와 채널 권한을 보존합니다. 아래 예제는 `.env`에 `COMPOSE_PROJECT_NAME=acdc-mcp`를 설정한 배포를 기준으로 합니다. 다른 프로젝트 이름을 사용했다면 `project`에 해당 이름을 넣습니다.
 
 ```bash
+(
 set -e
 umask 077
 project=acdc-mcp
@@ -91,9 +92,25 @@ git rev-parse HEAD > "$backup_dir/revision"
 docker compose -p "$project" images > "$backup_dir/images.txt"
 printf '%s\n' "$backup_db" > "$backup_dir/sqlite-filename"
 
-docker compose -p "$project" stop reverse-proxy team-mcp garage
-docker compose -p "$project" run --rm --no-deps team-mcp \
-  db-backup "/var/lib/team-mcp/$backup_db"
+running=$(docker compose -p "$project" ps --status running --services reverse-proxy team-mcp garage)
+services=()
+if [[ -n "$running" ]]; then mapfile -t services <<< "$running"; fi
+resume_services() {
+  local result=$?
+  if (( ${#services[@]} )); then
+    docker compose -p "$project" up -d --no-deps --no-recreate --wait "${services[@]}" || exit 1
+  fi
+  if (( result == 0 )); then printf 'Backup: %s\n' "$backup_dir"; fi
+  exit "$result"
+}
+trap resume_services EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if (( ${#services[@]} )); then
+  docker compose -p "$project" stop "${services[@]}"
+fi
+docker compose -p "$project" run --rm --no-deps -T team-mcp \
+  db-backup "/var/lib/team-mcp/$backup_db" </dev/null
 
 docker run --rm \
   --mount "type=volume,src=${project}_sqlite,dst=/snapshot/db,readonly" \
@@ -104,44 +121,58 @@ docker run --rm \
   "$helper_image" sh -ec 'tar -C /snapshot -czf /backup/volumes.tar.gz "db/$1" meta data caddy' sh "$backup_db"
 
 (cd "$backup_dir" && sha256sum volumes.tar.gz > volumes.sha256)
-docker compose -p "$project" up -d --wait
-printf 'Backup: %s\n' "$backup_dir"
+)
 ```
 
 `.env`, 변경한 Compose·Caddy·Garage 설정과 원래 `secrets/`도 같은 복구 시점에 맞춰 보관합니다. 아카이브에는 팀의 파일과 TLS 키가 들어 있습니다. 자료를 암호화해 다른 호스트에 보관합니다. 각 백업은 SQLite 볼륨에도 백업 DB 한 개를 남기므로 보존 정책에 따라 오래된 백업의 용량을 관리합니다.
 
 ## 빈 볼륨에 복원
 
-원본과 동일한 코드 리비전과 구성으로 복구 환경을 준비합니다. 보관했던 비밀 파일과 권한을 복원하고, 원본과 다른 **새 Compose 프로젝트 이름**을 선택합니다. 아래 `backup_dir`에는 검증할 백업의 절대 경로를 넣습니다.
+원본과 동일한 코드 리비전과 구성으로 복구 환경을 준비합니다. 보관했던 비밀 파일과 권한을 복원하고, 원본과 다른 **새 Compose 프로젝트 이름**을 선택합니다. 아래 `backup_dir`에는 검증할 백업의 절대 경로를 넣습니다. 복원 도우미가 네 볼륨을 모두 검사한 뒤 압축을 풉니다. 중단된 복원을 다시 시도할 때는 새 프로젝트 이름을 사용하고, 이전 볼륨은 점검할 수 있도록 보관합니다.
+
+복구용 Compose 오버라이드를 사용한다면 아래 `recovery` 배열에 해당 `-f` 옵션을 추가합니다. 네 볼륨이 모두 복구 프로젝트 전용인지 확인합니다.
 
 ```bash
 set -e
 recovery_project=acdc-mcp-restore
+recovery=(docker compose -p "$recovery_project" -f compose.yaml)
 backup_dir=/absolute/path/to/acdc-mcp-backup
 backup_db=$(cat "$backup_dir/sqlite-filename")
-helper_image='python:3.14.10-slim-trixie@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b'
 
 (cd "$backup_dir" && sha256sum --check volumes.sha256)
-docker compose -p "$recovery_project" build team-mcp garage-init
-docker compose -p "$recovery_project" create reverse-proxy
+"${recovery[@]}" build team-mcp garage-init </dev/null
 
-docker run --rm \
-  --mount "type=volume,src=${recovery_project}_sqlite,dst=/snapshot/db" \
-  --mount "type=volume,src=${recovery_project}_garage-meta,dst=/snapshot/meta" \
-  --mount "type=volume,src=${recovery_project}_garage-data,dst=/snapshot/data" \
-  --mount "type=volume,src=${recovery_project}_caddy-data,dst=/snapshot/caddy" \
-  --mount "type=bind,src=$backup_dir,dst=/backup,readonly" \
-  "$helper_image" sh -ec '
+"${recovery[@]}" -f - run --rm --no-deps -T \
+  -v "$backup_dir:/backup:ro" restore sh -ec '
+    exec 9</snapshot/db
+    flock -n 9 || { echo "Another restore holds the database volume" >&2; exit 1; }
+    for dir in /snapshot/db /snapshot/meta /snapshot/data /snapshot/caddy; do
+      entry=$(find "$dir" -mindepth 1 -maxdepth 1 -printf x -quit)
+      if [ -n "$entry" ]; then
+        printf "Restore target is not empty: %s\n" "$dir" >&2
+        exit 1
+      fi
+    done
     tar -C /snapshot -xzf /backup/volumes.tar.gz
     mv -- "/snapshot/db/$1" /snapshot/db/team.sqlite
     chown 10001:10001 /snapshot/db /snapshot/db/team.sqlite
-  ' sh "$backup_db"
+  ' sh "$backup_db" <<'YAML'
+services:
+  restore:
+    image: python:3.14.10-slim-trixie@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b
+    network_mode: none
+    volumes:
+      - sqlite:/snapshot/db
+      - garage-meta:/snapshot/meta
+      - garage-data:/snapshot/data
+      - caddy-data:/snapshot/caddy
+YAML
 
-docker compose -p "$recovery_project" run --rm --no-deps team-mcp reset-event-epoch
-docker compose -p "$recovery_project" up -d --wait team-mcp
-docker compose -p "$recovery_project" exec -T team-mcp team-mcp status
+"${recovery[@]}" run --rm --no-deps -T team-mcp reset-event-epoch </dev/null
+"${recovery[@]}" up -d --wait team-mcp </dev/null
+"${recovery[@]}" exec -T team-mcp team-mcp status </dev/null
 ```
 
-이 단계까지는 복구 프로젝트의 Caddy가 시작되지 않습니다. 준비 상태를 확인한 뒤 기존 서비스와 포트 충돌이 없는 시점에 `docker compose -p "$recovery_project" up -d --wait reverse-proxy`를 실행합니다. 외부 접속을 열기 전에 테스트 계정으로 메시지, 채널 권한, Artifact 다운로드와 SHA-256을 점검합니다. 백업 시점 이후에 폐기했던 토큰과 비활성화한 계정은 다시 반영합니다. 이벤트 커서에 `CURSOR_RESET`이 반환되면 0부터 동기화를 다시 시작합니다.
+이 단계까지는 복구 프로젝트의 Caddy가 시작되지 않습니다. 준비 상태를 확인한 뒤 기존 서비스와 포트 충돌이 없는 시점에 `"${recovery[@]}" up -d --wait reverse-proxy`를 실행합니다. 외부 접속을 열기 전에 테스트 계정으로 메시지, 채널 권한, Artifact 다운로드와 SHA-256을 점검합니다. 백업 시점 이후에 폐기했던 토큰과 비활성화한 계정은 다시 반영합니다. 이벤트 커서에 `CURSOR_RESET`이 반환되면 0부터 동기화를 다시 시작합니다.
 
 단일 Garage 노드에서는 디스크나 서버 장애 시 복구에 걸리는 시간만큼 서비스가 중지되고, 마지막 정상 백업 이후의 변경분을 잃을 수 있습니다.

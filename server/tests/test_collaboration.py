@@ -1,15 +1,21 @@
+import asyncio
+import base64
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastmcp import Client, FastMCP
+from pydantic import TypeAdapter
 
-from team_mcp import db as db_module
+from team_mcp import db as db_module, tools
 from team_mcp.collaboration import Collaboration
 from team_mcp.db import Database, DomainError, event, now
-from team_mcp.security import Security
+from team_mcp.security import RateLimits, Security
 from team_mcp.storage import Storage
+from team_mcp.tools import Cursor, StateKey
 
 
 @pytest.fixture
@@ -98,6 +104,49 @@ def test_shared_state_cas_and_recreate(team):
     assert collab.write_state(second, channel, "round", None, 1, "delete", deleted=True)["revision"] == 2
     assert collab.get_state(first, channel, "round")["deleted"]
     assert collab.write_state(first, channel, "round", {"number": 3}, 2, "three")["revision"] == 3
+
+
+@pytest.mark.parametrize("letter", ["한", "𐐀"])
+def test_state_cursor_round_trips_maximum_unicode_keys(team, letter):
+    collab, _, (writer, reader, _), _ = team
+    channel = collab.create_channel(writer, "State", "channel")["id"]
+    prefix = letter * 127
+    keys = [TypeAdapter(StateKey).validate_python(prefix + suffix) for suffix in ("a", "b")]
+    for key, request in zip(keys, ("first", "second")):
+        collab.write_state(writer, channel, key, 1, 0, request)
+    first = collab.list_state(reader, channel, prefix, None, 1)
+    cursor = TypeAdapter(Cursor).validate_python(first["next_cursor"])
+    second = collab.list_state(reader, channel, prefix, cursor, 1)
+    assert [item["key"] for item in first["items"] + second["items"]] == keys
+    assert second["next_cursor"] is None
+    with pytest.raises(DomainError, match="different query"):
+        collab.list_state(reader, channel, "", cursor, 1)
+
+
+def test_non_ascii_cursor_is_validation_error(team, monkeypatch):
+    collab, security, _, tokens = team
+    mcp = FastMCP("cursor test")
+    tools.install_tools(mcp, collab, None, security, RateLimits())
+    monkeypatch.setattr(tools, "get_access_token", lambda: SimpleNamespace(token=tokens[0]))
+
+    async def read_page():
+        async with Client(mcp) as client:
+            return await client.call_tool("list_channels", {"cursor": "abc.한"}, raise_on_error=False)
+
+    result = asyncio.run(read_page())
+    assert result.is_error
+    assert result.structured_content["error"]["code"] == "VALIDATION"
+    assert result.structured_content["error"]["retryable"] is False
+
+
+def test_pre_upgrade_cursor_keeps_query_binding(team):
+    _, security, (reader, other, _), _ = team
+    binding = [reader.agent_id, "channels", None]
+    payload = base64.urlsafe_b64encode(db_module.canonical([binding, "last"]).encode()).decode().rstrip("=")
+    legacy = f"{payload}.{security.sign(payload.encode())}"
+    assert security.position(legacy, binding) == "last"
+    with pytest.raises(DomainError, match="different query"):
+        security.position(legacy, [other.agent_id, "channels", None])
 
 
 def test_migration_shares_existing_private_channel_and_preserves_content(tmp_path):

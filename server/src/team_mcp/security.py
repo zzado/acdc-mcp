@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
-from .db import DomainError, audit, canonical, now
+from .db import DomainError, audit, canonical, digest, now
 
 
 @dataclass(frozen=True)
@@ -57,20 +57,21 @@ class Security:
         return Principal(row["id"], row["user_id"], prefix[4:])
 
     def cursor(self, binding, position):
-        payload = base64.urlsafe_b64encode(canonical([binding, position]).encode()).decode().rstrip("=")
+        payload = base64.urlsafe_b64encode(canonical([digest(binding), position]).encode()).decode().rstrip("=")
         return f"{payload}.{self.sign(payload.encode())}"
 
     def position(self, cursor, binding):
         if cursor is None:
             return None
         payload, _, signature = cursor.partition(".")
-        if len(payload) > 1000 or not hmac.compare_digest(self.sign(payload.encode()), signature):
+        if not cursor.isascii() or len(payload) > 1000 or not hmac.compare_digest(self.sign(payload.encode()), signature):
             raise DomainError("VALIDATION", "Invalid cursor")
         try:
             stored, position = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         except (ValueError, binascii.Error):
             raise DomainError("VALIDATION", "Invalid cursor") from None
-        if stored != binding:
+        # Older, already issued cursors contain the full query binding.
+        if stored != digest(binding) and stored != binding:
             raise DomainError("VALIDATION", "Cursor belongs to a different query")
         return position
 

@@ -116,11 +116,13 @@ $file = '.\candidate.bin'
 3. 반환된 URL과 `Content-Length` 값을 그대로 사용합니다. URL은 전체 문자열을 따옴표로 감싸 쿼리를 보존합니다.
 
    ```bash
-   read -rsp 'PUT URL: ' PUT_URL; printf '\n'
-   read -rp 'Content-Length: ' LENGTH
-   curl --fail --silent --show-error --max-time 900 \
-     --header "Content-Length: $LENGTH" --upload-file "$file" "$PUT_URL"
-   unset PUT_URL
+   (
+     read -rsp 'PUT URL: ' PUT_URL || exit 1
+     printf '\n'
+     read -rp 'Content-Length: ' LENGTH || exit 1
+     curl --fail --silent --show-error --max-time 900 \
+       --header "Content-Length: $LENGTH" --upload-file "$file" "$PUT_URL"
+   )
    ```
 
    ```powershell
@@ -167,12 +169,17 @@ Multipart ETag는 Part 확인에 사용됩니다. 게시 여부는 서버가 계
 `list_artifacts`로 채널의 게시 파일을 찾습니다. 파일명·설명 검색에는 `query`, 태그 검색에는 `tag`를 사용합니다. `get_artifact`는 `artifact_id`의 메타데이터를 반환합니다. 파일을 내려받으려면 `request_download`에 `{"artifact_id":"ARTIFACT_ID"}`를 보내 `url`, `size`, `sha256`을 받습니다.
 
 ```bash
-read -rsp 'GET URL: ' GET_URL; printf '\n'
-read -rp 'Expected SHA-256: ' EXPECTED_SHA256
-output=./downloaded-candidate.bin
-curl --fail --silent --show-error --output "$output" "$GET_URL"
-printf '%s  %s\n' "$EXPECTED_SHA256" "$output" | sha256sum --check
-unset GET_URL
+(
+  read -rsp 'GET URL: ' GET_URL || exit 1
+  printf '\n'
+  read -rp 'Expected SHA-256: ' EXPECTED_SHA256 || exit 1
+  output=./downloaded-candidate.bin
+  part=$(mktemp -- "$output.XXXXXXXX") || exit 1
+  trap 'rm -f -- "$part"' EXIT
+  curl --fail --silent --show-error --output "$part" "$GET_URL" || exit $?
+  printf '%s  %s\n' "$EXPECTED_SHA256" "$part" | sha256sum --check || exit $?
+  mv -T -- "$part" "$output"
+)
 ```
 
 PowerShell에서도 다운로드 결과를 `request_download`가 반환한 `sha256`과 비교합니다. 사설 테스트 서버에만 [Windows 사설 테스트 CA 설정](#windows-사설-테스트-ca)을 적용합니다.
