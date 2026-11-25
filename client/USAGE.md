@@ -88,6 +88,12 @@ $file = '.\candidate.bin'
 (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
 ```
 
+### Windows 사설 테스트 CA
+
+아래 PowerShell PUT·GET 예제에서 `$curlTls = @()`는 공인 인증서를 쓰는 운영 `:8888`의 기본값입니다. **격리된 사설 테스트 서버**에 전송할 때만 그 한 줄을 `$curlTls = @('--cacert', '.\root.crt')`로 바꿉니다. `root.crt`는 운영자가 신뢰하는 경로로 전달한 해당 테스트 CA의 루트 인증서입니다.
+
+`curl.exe --version`이 `Schannel`이고 오류 60에 `the revocation status is unknown`이 표시되면 `$curlTls = @('--cacert', '.\root.crt', '--ssl-revoke-best-effort')`로 다시 시도합니다. 같은 오류가 계속될 때만 마지막 옵션을 `--ssl-no-revoke`로 교체합니다. 이 옵션은 해당 호출의 인증서 폐기 확인 전체를 끕니다. [서버 운영 가이드의 접속 확인](../server/OPERATIONS.md#사설-https)
+
 ### 전송 예약과 PUT
 
 1. `request_upload`에 메타데이터만 전달합니다.
@@ -120,9 +126,11 @@ $file = '.\candidate.bin'
    ```powershell
    $putUrl = Read-Host -MaskInput 'PUT URL'
    $length = Read-Host 'Content-Length'
-   curl.exe --fail --silent --show-error --max-time 900 `
+   $curlTls = @()
+   curl.exe @curlTls --fail --silent --show-error --max-time 900 `
      --header "Content-Length: $length" --upload-file $file $putUrl
-   Remove-Variable putUrl
+   Remove-Variable putUrl, curlTls
+   if ($LASTEXITCODE -ne 0) { throw '업로드 실패' }
    ```
 
 4. PUT이 성공하면 `complete_upload`에 `{"upload_id":"UPLOAD_ID"}`를 전달합니다. `get_upload_status`로 상태가 `ready`가 될 때까지 확인합니다. `sealing`은 업로드 확정 중, `verifying`은 최종 객체 검증 중입니다. `ready`일 때 반환된 `verified_sha256`과 로컬 해시를 비교한 뒤 `artifact_id`를 공유합니다.
@@ -167,7 +175,21 @@ printf '%s  %s\n' "$EXPECTED_SHA256" "$output" | sha256sum --check
 unset GET_URL
 ```
 
-PowerShell에서는 `curl.exe --fail --output .\downloaded-candidate.bin $getUrl`로 전송하고 `Get-FileHash -Algorithm SHA256` 결과를 반환된 `sha256`과 비교합니다. URL이 만료됐으면 `request_download`로 새 URL을 받습니다. 임시 URL은 접근 권한을 담고 있으므로 메시지와 공유 로그에는 Artifact ID만 남깁니다.
+PowerShell에서도 다운로드 결과를 `request_download`가 반환한 `sha256`과 비교합니다. 사설 테스트 서버에만 [Windows 사설 테스트 CA 설정](#windows-사설-테스트-ca)을 적용합니다.
+
+```powershell
+$getUrl = Read-Host -MaskInput 'GET URL'
+$expectedSha256 = Read-Host 'Expected SHA-256'
+$curlTls = @()
+curl.exe @curlTls --fail --silent --show-error --output .\downloaded-candidate.bin $getUrl
+Remove-Variable getUrl, curlTls
+if ($LASTEXITCODE -ne 0) { throw '다운로드 실패' }
+if ((Get-FileHash -LiteralPath .\downloaded-candidate.bin -Algorithm SHA256).Hash -ne $expectedSha256) {
+    throw 'SHA-256 불일치'
+}
+```
+
+URL이 만료됐으면 `request_download`로 새 URL을 받습니다. 임시 URL은 접근 권한을 담고 있으므로 메시지와 공유 로그에는 Artifact ID만 남깁니다.
 
 ## MCP 도구 목록
 

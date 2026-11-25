@@ -11,7 +11,16 @@ docker compose up -d --wait reverse-proxy
 docker compose cp reverse-proxy:/data/caddy/pki/authorities/local/root.crt /tmp/acdc-mcp-root.crt
 ```
 
-서버에서 내보낸 `root.crt`를 배포할 팀원이 신뢰하는 경로로 전달하고 각 Agent 호스트의 신뢰 저장소에 추가합니다. 클라이언트에 따라 별도의 CA 설정이 필요할 수 있습니다. curl 접속 확인에는 `--cacert /path/to/acdc-mcp-root.crt`를 사용합니다. Caddy 데이터 볼륨에는 CA의 개인키도 있으므로 배포 중 보관하고 백업을 암호화합니다.
+내보낸 루트 인증서를 팀원이 신뢰하는 경로로 전달하고 각 Agent 호스트의 신뢰 저장소에 추가합니다. 클라이언트에 따라 별도의 CA 설정이 필요할 수 있습니다. curl에서는 `--cacert`로 인증서 파일을 지정할 수 있습니다. Caddy 데이터 볼륨에는 CA의 개인키도 있으므로 백업을 암호화합니다.
+
+Windows에서 사설 테스트 CA를 확인하려면 전달받은 인증서를 `.\root.crt`에 두고 토큰 없이 다음 명령을 실행합니다. `401`이 표시되면 TLS 연결을 마치고 MCP 서버의 인증 응답을 받은 것입니다.
+
+```powershell
+$mcpUrl = Read-Host '사설 테스트 MCP URL (/mcp 포함)'
+curl.exe --cacert .\root.crt --silent --show-error --output NUL --write-out '%{http_code}\n' $mcpUrl
+```
+
+`curl.exe --version`에 `Schannel`이 표시되고 오류 60의 사유가 `the revocation status is unknown`이면, **격리된 사설 테스트 CA에 한해** 위 명령에 `--ssl-revoke-best-effort`를 추가합니다. 이 옵션은 폐기 정보를 구할 수 없을 때 연결을 허용합니다. 같은 오류가 계속되면 해당 테스트 호출에서만 `--ssl-no-revoke`로 교체할 수 있습니다. 이 옵션은 폐기 확인 전체를 끄므로 `--cacert`는 유지하고 공인 인증서를 쓰는 운영 `:8888`과 전역 curl 설정에서는 두 옵션을 모두 생략합니다. [curl의 Schannel 옵션 설명](https://curl.se/docs/manpage.html#--ssl-no-revoke)
 
 ## 팀원·Agent와 토큰
 
